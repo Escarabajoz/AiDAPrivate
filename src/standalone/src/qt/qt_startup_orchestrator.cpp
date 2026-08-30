@@ -18,6 +18,7 @@
 #include <string>
 
 #include "helpers/diag_log.hpp"
+#include "core/ai/standalone_chat.hpp"
 #include "core/diagnostics/crash_snapshot.hpp"
 #include "core/infra/executor.hpp"
 #include "core/runtime/standalone_driver.hpp"
@@ -142,6 +143,29 @@ __declspec(noinline) DWORD seh_mitm_proxy_pre_initialize()
         return GetExceptionCode();
     }
     startup_log_critical_fmt("seh_mitm_proxy_pre_initialize_exit elapsed_ms=%llu last_err=%lu",
+        static_cast<unsigned long long>(static_cast<uint64_t>(GetTickCount64()) - started),
+        static_cast<unsigned long>(GetLastError()));
+    return 0;
+}
+
+__declspec(noinline) DWORD seh_init_standalone_chat()
+{
+    const uint64_t started = static_cast<uint64_t>(GetTickCount64());
+    startup_log_critical_fmt("seh_init_standalone_chat_enter pid=%lu tid=%lu tick=%llu",
+        GetCurrentProcessId(),
+        GetCurrentThreadId(),
+        static_cast<unsigned long long>(started));
+    __try {
+        ::init_standalone_chat();
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        aida::diagnostics::crash::emit_crash_breadcrumb(GetExceptionCode(), nullptr, "seh_init_standalone_chat");
+        startup_log_critical_fmt("seh_init_standalone_chat_exception code=0x%08X elapsed_ms=%llu last_err=%lu",
+            GetExceptionCode(),
+            static_cast<unsigned long long>(static_cast<uint64_t>(GetTickCount64()) - started),
+            static_cast<unsigned long>(GetLastError()));
+        return GetExceptionCode();
+    }
+    startup_log_critical_fmt("seh_init_standalone_chat_exit elapsed_ms=%llu last_err=%lu",
         static_cast<unsigned long long>(static_cast<uint64_t>(GetTickCount64()) - started),
         static_cast<unsigned long>(GetLastError()));
     return 0;
@@ -526,10 +550,9 @@ void AidaStartupOrchestrator::kickoffBackgroundInit()
             store_bg_step(step, "bg_init_worker", phase);
         };
 
-        store_bg_step(1, "bg_init_worker_enter", "init_standalone_chat");
-        diag::log_tagged("bg_init", "init_standalone_chat_start");
+        run_step("init_standalone_chat_start", "init_standalone_chat", "init_standalone_chat_ok", 1,
+            []() { return seh_init_standalone_chat(); });
         log_deferred_init("init_standalone_chat", "13_ai_settings.md");
-        store_bg_step(1, "bg_init_worker", "init_standalone_chat");
 
         store_bg_step(2, "bg_init_worker_enter", "network_view_init");
         diag::log_tagged("bg_init", "network_view_init_start");
@@ -702,6 +725,8 @@ void AidaStartupOrchestrator::runDeferredServicesTrigger(const char* source)
     }
     log_deferred_init("mark_ide_ready_for_mcp_services", "13_ai_settings.md");
     log_deferred_init("start_authorized_mcp_services", "13_ai_settings.md");
+    ::mark_ide_ready_for_mcp_services();
+    ::start_authorized_mcp_services();
     if (!g_camoufox_prewarm_posted.exchange(true, std::memory_order_acq_rel))
     {
         bool prewarm_posted = aida::burp::camoufox::prewarm_default_async("render_authorized");

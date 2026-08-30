@@ -1,4 +1,4 @@
-﻿#ifndef WIN32_LEAN_AND_MEAN
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
@@ -4042,6 +4042,114 @@ static json enum_values_from_description(const std::string& description)
     for (const auto& value : values)
         out.push_back(value);
     return out;
+}
+
+static void normalize_combinators_for_strict_clients(json& node)
+{
+    if (node.is_array()) {
+        for (auto& element : node)
+            normalize_combinators_for_strict_clients(element);
+        return;
+    }
+    if (!node.is_object())
+        return;
+
+    auto one_of = node.find("oneOf");
+    if (one_of != node.end()) {
+        if (one_of->is_array()) {
+            auto any_of = node.find("anyOf");
+            if (any_of == node.end()) {
+                node["anyOf"] = std::move(*one_of);
+            } else if (any_of->is_array()) {
+                for (auto& alternative : *one_of)
+                    any_of->push_back(std::move(alternative));
+            }
+        }
+        node.erase(one_of);
+    }
+
+    auto combinator = node.find("anyOf");
+    if (combinator != node.end() && combinator->is_array()) {
+        for (auto& alternative : *combinator)
+            normalize_combinators_for_strict_clients(alternative);
+
+        std::vector<std::string> movable_keys;
+        for (auto it = node.begin(); it != node.end(); ++it) {
+            const std::string key = it.key();
+            if (key == "anyOf" || key == "description" || key == "title")
+                continue;
+            movable_keys.push_back(key);
+        }
+        for (const auto& key : movable_keys)
+            normalize_combinators_for_strict_clients(node[key]);
+        for (auto& alternative : *combinator) {
+            if (!alternative.is_object())
+                continue;
+            for (const auto& key : movable_keys) {
+                if (key == "required") {
+                    json merged = json::array();
+                    auto branch_required = alternative.find("required");
+                    if (branch_required != alternative.end() && branch_required->is_array()) {
+                        for (const auto& value : *branch_required) {
+                            if (std::find(merged.begin(), merged.end(), value) == merged.end())
+                                merged.push_back(value);
+                        }
+                    }
+                    for (const auto& value : node["required"]) {
+                        if (std::find(merged.begin(), merged.end(), value) == merged.end())
+                            merged.push_back(value);
+                    }
+                    alternative["required"] = std::move(merged);
+                } else if (key == "enum") {
+                    auto branch_type = alternative.find("type");
+                    if (branch_type != alternative.end() && branch_type->is_string()) {
+                        const std::string t = branch_type->get<std::string>();
+                        json filtered = json::array();
+                        for (const auto& value : node["enum"]) {
+                            const bool match =
+                                (t == "string" && value.is_string()) ||
+                                (t == "integer" && value.is_number_integer()) ||
+                                (t == "number" && value.is_number()) ||
+                                (t == "boolean" && value.is_boolean()) ||
+                                (t == "null" && value.is_null()) ||
+                                (t == "object" && value.is_object()) ||
+                                (t == "array" && value.is_array());
+                            if (match)
+                                filtered.push_back(value);
+                        }
+                        if (!filtered.empty())
+                            alternative["enum"] = std::move(filtered);
+                    } else {
+                        alternative["enum"] = node["enum"];
+                    }
+                } else if (!alternative.contains(key)) {
+                    alternative[key] = node[key];
+                }
+            }
+        }
+        for (const auto& key : movable_keys)
+            node.erase(key);
+        return;
+    }
+
+    for (auto& entry : node.items())
+        normalize_combinators_for_strict_clients(entry.value());
+}
+
+json sanitize_input_schema_for_strict_clients(json schema)
+{
+    if (schema.is_object()) {
+        auto type = schema.find("type");
+        if (type != schema.end() && type->is_string()) {
+            for (const char* keyword : {"anyOf", "oneOf"}) {
+                auto combinator = schema.find(keyword);
+                if (combinator != schema.end() && combinator->is_array())
+                    schema.erase(keyword);
+            }
+        }
+    }
+    normalize_combinators_for_strict_clients(schema);
+    return schema;
 }
 
 static json build_input_schema(const tool_def_t& tool)
@@ -13436,11 +13544,18 @@ json server_t::tool_schema(const tool_def_t& tool, bool compact) const
         annotations["openWorldHint"]   = (tool.name == "sandbox_execute");
     }
 
+    json served_input_schema = sanitize_input_schema_for_strict_clients(*input_schema);
+
+    static const json k_compact_input_schema = {
+        {"type", "object"},
+        {"properties", json::object()}
+    };
+
     if (compact && tool.name != "get_tool_descriptions") {
         json t;
         t["name"]        = tool.name;
         t["description"] = tool.description;
-        t["inputSchema"] = *input_schema;
+        t["inputSchema"] = k_compact_input_schema;
         if (!tool.output_schema.is_null())
             t["outputSchema"] = tool.output_schema;
         t["read_only"]   = tool.read_only;
@@ -13455,7 +13570,7 @@ json server_t::tool_schema(const tool_def_t& tool, bool compact) const
     json t;
     t["name"]        = tool.name;
     t["description"] = tool.description;
-    t["inputSchema"] = *input_schema;
+    t["inputSchema"] = served_input_schema;
     if (!tool.output_schema.is_null())
         t["outputSchema"] = tool.output_schema;
     t["annotations"] = annotations;
@@ -13796,7 +13911,7 @@ json server_t::handle_initialize(const json& id, const json&)
         "- Convert integers, endian bytes, ASCII, signed/unsigned views, IEEE-754 values, alignment, VA, RVA, module-relative, and PE file-offset references\n"
         "- Use bundled Camoufox reverse-engineering browser tools through grouped actions exposed as `browser_lifecycle`, `browser_navigation`, `browser_interaction`, `browser_inspect`, `browser_state`, `browser_network`, `browser_hooks`, and `browser_instrumentation`\n\n"
         "## First-use workflow\n"
-        "- Use `get_tool_descriptions` with `names`, `prefix`, or `query` for only the tools you plan to call; do not spam broad discovery calls\n"
+        "- `tools/list` returns compact tool entries by default (name, description, and a minimal schema). Call `get_tool_descriptions` with `names`, `prefix`, `query`, or `group` to retrieve full parameter schemas for the tools you plan to use.\n"
         "- For standalone static binaries, use `sessions_manage` action `open_file`, then `analysis_query` action `binary_map_overview` or `disasm_get_section_info`, `disasm_list_functions`, and targeted disassembly/decompilation tools\n"
         "- For live runtime work, use `sessions_manage` action `attach_pid` for session attachment, then memory/disassembly tools.\n"
         "- When a VM bridge is active, pass `target: \"guest\"` or `target: \"host\"` explicitly whenever host/VM memory matters\n"
@@ -13843,15 +13958,16 @@ json server_t::handle_tools_list(const json& id, const json& params)
         if (!is_external_mcp_tool(t)) continue;
         tools_arr.push_back(tool_schema(t, compact));
     }
-    diag::log_tagged_fmt("mcp_srv", "handle_tools_list compact=%d count=%zu",
-        compact ? 1 : 0, tools_arr.size());
     json result;
     result["tools"] = tools_arr;
     result["_meta"] = {
         {"aidaToolListMode", compact ? "compact" : "full"},
         {"aidaToolDetailTool", "get_tool_descriptions"}
     };
-    return make_result(id, result);
+    json response = make_result(id, result);
+    diag::log_tagged_fmt("mcp_srv", "handle_tools_list compact=%d count=%zu response_bytes=%zu",
+        compact ? 1 : 0, tools_arr.size(), json_dump_safe(response).size());
+    return response;
 }
 
 json server_t::handle_tools_call(const json& id, const json& params)
@@ -17625,7 +17741,7 @@ static const char* MCP_NAME = "aida-standalone-mcp";
 
 struct client_cfg_t {
     const char* name;
-    enum { URL, SERVERURL, OPENCODE, VSCODE, VSCODE_JSON, CLINE, ZED, CODEX, CLAUDE_CODE } format;
+    enum { URL, SERVERURL, OPENCODE, VSCODE, VSCODE_JSON, CLINE, ZED, CODEX, CLAUDE_CODE, KIMI } format;
     const char* win_path;
 };
 
@@ -17669,6 +17785,7 @@ static const client_cfg_t g_clients[] = {
     { "VS Code Insiders",client_cfg_t::VSCODE,       "%APPDATA%/Code - Insiders/User/settings.json" },
     { "VS Code (mcp.json)", client_cfg_t::VSCODE_JSON, "%APPDATA%/Code/User/mcp.json" },
     { "VS Code Insiders (mcp.json)", client_cfg_t::VSCODE_JSON, "%APPDATA%/Code - Insiders/User/mcp.json" },
+    { "Kimi Code",       client_cfg_t::KIMI,         "~/.kimi-code/mcp.json" },
 };
 
 static bool is_managed_key(const std::string& key)
@@ -17708,6 +17825,20 @@ static bool write_mcpservers(const std::string& path, const std::string& url,
     config["mcpServers"][MCP_NAME]["type"] = "http";
     config["mcpServers"][MCP_NAME][key] = url;
     config["mcpServers"][MCP_NAME]["headers"] = handoff.headers();
+    return write_json_file(path, config);
+}
+
+static bool write_kimi(const std::string& path, const std::string& url,
+                       const client_handoff_t& handoff)
+{
+    json config;
+    if (std::filesystem::exists(path)) parse_json_file(path, config, false);
+    if (!config.is_object()) config = json::object();
+    if (!config.contains("mcpServers") || !config["mcpServers"].is_object())
+        config["mcpServers"] = json::object();
+    erase_managed_keys(config["mcpServers"]);
+    config["mcpServers"][MCP_NAME] = {
+        {"url", url}, {"headers", handoff.headers()}};
     return write_json_file(path, config);
 }
 
@@ -17897,6 +18028,7 @@ void server_t::write_client_configs() const
             case client_cfg_t::ZED:          success = write_zed(path, http_url, handoff); break;
             case client_cfg_t::CODEX:        success = write_codex(path, http_url, handoff); break;
             case client_cfg_t::CLAUDE_CODE:  success = write_claude_code(path, http_url, handoff); break;
+            case client_cfg_t::KIMI:         success = write_kimi(path, http_url, handoff); break;
             }
 
             if (success) {

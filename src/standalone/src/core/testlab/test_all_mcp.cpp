@@ -20768,8 +20768,9 @@ try{window.addEventListener('load',function(){run('load');},{once:true});}catch(
                 const auto& descriptor = descriptors[index];
                 const std::string name(descriptor.name);
                 const auto found = listed_tools.find(name);
-                const auto input_schema = mcp_standalone::json::parse(
-                    descriptor.input_schema_json.begin(), descriptor.input_schema_json.end());
+                const auto input_schema = mcp_standalone::sanitize_input_schema_for_strict_clients(
+                    mcp_standalone::json::parse(
+                        descriptor.input_schema_json.begin(), descriptor.input_schema_json.end()));
                 const auto output_schema = mcp_standalone::json::parse(
                     descriptor.output_schema_json.begin(), descriptor.output_schema_json.end());
                 const auto annotations = mcp_standalone::json::parse(

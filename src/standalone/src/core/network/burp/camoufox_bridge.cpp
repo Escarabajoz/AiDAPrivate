@@ -252,6 +252,7 @@ constexpr int kLaunchWaitMaxMs = 120000;
 constexpr int kBundledVisibleReadinessMaxMs = 40000;
 constexpr int kBundledVisibleLaunchWaitMinMs = 5000;
 constexpr int kBundledVisibleLaunchWaitMaxMs = kBundledVisibleReadinessMaxMs;
+constexpr int kBridgeStartupPhaseMaxMs = 180000;
 constexpr int kTestLabLaunchWaitDefaultMs = 40000;
 constexpr int kTestLabLaunchWaitMaxMs = 40000;
 constexpr int kStrictLaunchBudgetMs = 135000;
@@ -2068,6 +2069,52 @@ std::string addon_cache_fingerprint_key(const addon_cache_fingerprint_t& fp)
     return oss.str();
 }
 
+uint32_t prune_invalid_camoufox_addons(const char* reason)
+{
+    wchar_t local[MAX_PATH] = {};
+    const DWORD got = GetEnvironmentVariableW(L"LOCALAPPDATA", local, MAX_PATH);
+    if (got == 0 || got >= MAX_PATH)
+        return 0;
+    const std::wstring addons_dir = join_path_w(join_path_w(join_path_w(join_path_w(local, L"camoufox"), L"camoufox"), L"Cache"), L"addons");
+    if (!directory_exists_w(addons_dir))
+        return 0;
+    uint32_t pruned = 0;
+    WIN32_FIND_DATAW fd = {};
+    const std::wstring pattern = join_path_w(addons_dir, L"*");
+    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    do
+    {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+            continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0)
+            continue;
+        const std::wstring addon_dir = join_path_w(addons_dir, fd.cFileName);
+        const std::wstring manifest = join_path_w(addon_dir, L"manifest.json");
+        if (path_exists_w(manifest))
+            continue;
+        uint32_t files_removed = 0;
+        uint32_t dirs_removed = 0;
+        const uint64_t t0 = now_ms();
+        const bool removed = remove_directory_tree_w(addon_dir, files_removed, dirs_removed);
+        const DWORD gle = removed ? 0 : GetLastError();
+        diag::log_tagged_fmt("camoufox", "addon_prune name=%s removed=%d gle=%lu files=%lu dirs=%lu elapsed_ms=%llu reason=%s dir=%s",
+            wide_to_utf8(fd.cFileName).c_str(),
+            removed ? 1 : 0,
+            static_cast<unsigned long>(gle),
+            static_cast<unsigned long>(files_removed),
+            static_cast<unsigned long>(dirs_removed),
+            static_cast<unsigned long long>(now_ms() - t0),
+            reason ? reason : "unknown",
+            wide_to_utf8(addon_dir).c_str());
+        if (removed)
+            ++pruned;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return pruned;
+}
+
 struct source_bridge_file_fingerprint_t
 {
     std::string path;
@@ -3495,38 +3542,6 @@ int effective_launch_wait_ms(const launch_config_t& cfg, bool bundled_visible_la
         wait_ms,
         kStrictLaunchBudgetMs);
     return wait_ms;
-}
-
-int apply_visible_readiness_budget_ms(int launch_wait_ms,
-                                      bool bundled_visible_launch,
-                                      uint64_t start_ms,
-                                      const char* phase,
-                                      uint64_t generation,
-                                      uint32_t child_pid)
-{
-    if (!bundled_visible_launch)
-        return launch_wait_ms;
-    const uint64_t elapsed_ms = now_ms() - start_ms;
-    const uint64_t remaining_ms = elapsed_ms >= static_cast<uint64_t>(kBundledVisibleReadinessMaxMs)
-        ? 0
-        : static_cast<uint64_t>(kBundledVisibleReadinessMaxMs) - elapsed_ms;
-    const int bounded_ms = remaining_ms > static_cast<uint64_t>(std::numeric_limits<int>::max())
-        ? launch_wait_ms
-        : std::min<int>(launch_wait_ms, static_cast<int>(remaining_ms));
-    if (bounded_ms != launch_wait_ms)
-    {
-        diag::log_tagged_fmt("camoufox",
-            "visible_readiness_budget_clamped phase=%s generation=%llu child_pid=%lu elapsed_ms=%llu remaining_ms=%llu requested_launch_wait_ms=%d bounded_launch_wait_ms=%d max_total_ms=%d",
-            phase && phase[0] ? phase : "<unknown>",
-            static_cast<unsigned long long>(generation),
-            static_cast<unsigned long>(child_pid),
-            static_cast<unsigned long long>(elapsed_ms),
-            static_cast<unsigned long long>(remaining_ms),
-            launch_wait_ms,
-            bounded_ms,
-            kBundledVisibleReadinessMaxMs);
-    }
-    return std::max(0, bounded_ms);
 }
 
 int clamp_navigation_call_wait_ms(int requested)
@@ -7863,6 +7878,7 @@ bool start_bridge(const launch_config_t& cfg)
 
     lk.unlock();
     sweep_stale_camoufox_processes_by_name(0, "start_bridge_pre_launch_sweep");
+    prune_invalid_camoufox_addons("start_bridge_pre_launch");
     lk.lock();
 
     bool ready_config_mismatch_handled = false;
@@ -8379,8 +8395,8 @@ bool start_bridge(const launch_config_t& cfg)
     const bool bundled_visible_launch = !effective_cfg.headless && !effective_cfg.browser_executable.empty();
     const bool testlab_fast_probe = test_lab_launch_fail_fast_enabled(effective_cfg);
     int launch_wait_ms = effective_launch_wait_ms(effective_cfg, bundled_visible_launch);
-    launch_wait_ms = apply_visible_readiness_budget_ms(launch_wait_ms, bundled_visible_launch, bridge_start_ms, "start_bridge_pre_launch", start_generation, sg().child_pid);
-    if (bundled_visible_launch && launch_wait_ms < kLaunchWaitMinMs)
+    const uint64_t startup_phase_elapsed_ms = now_ms() - bridge_start_ms;
+    if (bundled_visible_launch && startup_phase_elapsed_ms > static_cast<uint64_t>(kBridgeStartupPhaseMaxMs))
     {
         auto failed_client = sg().client;
         const uint32_t failed_pid = sg().child_pid;
@@ -8389,17 +8405,17 @@ bool start_bridge(const launch_config_t& cfg)
         sg().child_pid = 0;
         sg().state = bridge_state_t::error;
         sg().last_launch_ms = now_ms() - bridge_start_ms;
-        sg().last_error = "camoufox visible readiness budget exhausted before launch_browser";
-        block_auto_restart_locked("visible_readiness_budget_exhausted", start_generation, kAutoRestartBlockMs);
-        mark_cleanup_started_locked(start_generation, failed_pid, "visible_readiness_budget_exhausted");
+        sg().last_error = "camoufox startup phase budget exhausted before launch_browser";
+        block_auto_restart_locked("startup_phase_budget_exhausted", start_generation, kAutoRestartBlockMs);
+        mark_cleanup_started_locked(start_generation, failed_pid, "startup_phase_budget_exhausted");
         const std::string debug_tail = read_file_tail_for_log(child_debug_log, 4000);
         const std::vector<process_tree_entry_t> budget_tree_entries = failed_pid == 0 ? std::vector<process_tree_entry_t>() : enumerate_process_tree(failed_pid);
         sg().last_launch_diagnostics = {
             {"status", "timeout"},
-            {"phase", "visible_readiness_budget"},
+            {"phase", "startup_phase_budget"},
             {"transport_phase", "pre_launch"},
             {"caller", "start_bridge"},
-            {"cancellation_source", "visible_readiness_budget_exhausted"},
+            {"cancellation_source", "startup_phase_budget_exhausted"},
             {"generation", start_generation},
             {"attempt_id", std::to_string(start_generation) + "-" + std::to_string(now_ms())},
             {"session_id", effective_cfg.session_id.empty() ? std::string("default") : effective_cfg.session_id},
@@ -8408,7 +8424,8 @@ bool start_bridge(const launch_config_t& cfg)
             {"elapsed_ms", sg().last_launch_ms},
             {"requested_ms", cfg.launch_timeout_ms},
             {"effective_ms", launch_wait_ms},
-            {"visible_readiness_max_ms", kBundledVisibleReadinessMaxMs},
+            {"startup_phase_elapsed_ms", startup_phase_elapsed_ms},
+            {"startup_phase_max_ms", kBridgeStartupPhaseMaxMs},
             {"process_tree", compact_process_tree_with_exit(budget_tree_entries)},
             {"process_tree_count", budget_tree_entries.size()},
             {"debug_tail_len", debug_tail.size()},
@@ -8417,9 +8434,9 @@ bool start_bridge(const launch_config_t& cfg)
         };
         attach_debug_log_snapshot_locked(sg().last_launch_diagnostics, failed_pid, child_debug_log, debug_tail);
         const std::string state_error = sg().last_error;
-        finish_start_bridge_failure_cleanup_locked(lk, failed_client, failed_pid, "visible_readiness_budget_exhausted", start_generation, state_error);
+        finish_start_bridge_failure_cleanup_locked(lk, failed_client, failed_pid, "startup_phase_budget_exhausted", start_generation, state_error);
         publish_state(bridge_state_t::error, sg().last_error);
-        emit_stage_timing(false, "visible_readiness_budget", failed_pid);
+        emit_stage_timing(false, "startup_phase_budget", failed_pid);
         return false;
     }
     int wait_ms = launch_wait_ms / 4;
@@ -8499,50 +8516,6 @@ bool start_bridge(const launch_config_t& cfg)
         terminate_process_id_async(failed_pid, "required_reverse_tools_missing");
         publish_state(bridge_state_t::error, sg().last_error);
         emit_stage_timing(false, "tools", failed_pid);
-        return false;
-    }
-
-    launch_wait_ms = apply_visible_readiness_budget_ms(launch_wait_ms, bundled_visible_launch, bridge_start_ms, "start_bridge_launch_rpc", start_generation, sg().child_pid);
-    if (bundled_visible_launch && launch_wait_ms < kLaunchWaitMinMs)
-    {
-        auto failed_client = sg().client;
-        const uint32_t failed_pid = sg().child_pid;
-        sg().client.reset();
-        clear_page_state_locked();
-        sg().child_pid = 0;
-        sg().state = bridge_state_t::error;
-        sg().last_launch_ms = now_ms() - bridge_start_ms;
-        sg().last_error = "camoufox visible readiness budget exhausted before launch_browser";
-        block_auto_restart_locked("visible_readiness_budget_exhausted_after_tools", start_generation, kAutoRestartBlockMs);
-        mark_cleanup_started_locked(start_generation, failed_pid, "visible_readiness_budget_exhausted_after_tools");
-        const std::string debug_tail = read_file_tail_for_log(child_debug_log, 4000);
-        const std::vector<process_tree_entry_t> budget_tree_entries = failed_pid == 0 ? std::vector<process_tree_entry_t>() : enumerate_process_tree(failed_pid);
-        sg().last_launch_diagnostics = {
-            {"status", "timeout"},
-            {"phase", "visible_readiness_budget"},
-            {"transport_phase", "pre_launch"},
-            {"caller", "start_bridge"},
-            {"cancellation_source", "visible_readiness_budget_exhausted_after_tools"},
-            {"generation", start_generation},
-            {"attempt_id", std::to_string(start_generation) + "-" + std::to_string(now_ms())},
-            {"session_id", effective_cfg.session_id.empty() ? std::string("default") : effective_cfg.session_id},
-            {"child_pid", failed_pid},
-            {"child_alive", failed_pid != 0 && process_alive(failed_pid)},
-            {"elapsed_ms", sg().last_launch_ms},
-            {"requested_ms", cfg.launch_timeout_ms},
-            {"effective_ms", launch_wait_ms},
-            {"visible_readiness_max_ms", kBundledVisibleReadinessMaxMs},
-            {"process_tree", compact_process_tree_with_exit(budget_tree_entries)},
-            {"process_tree_count", budget_tree_entries.size()},
-            {"debug_tail_len", debug_tail.size()},
-            {"stderr_last_frame", debug_tail},
-            {"stderr_last_frame_len", debug_tail.size()}
-        };
-        attach_debug_log_snapshot_locked(sg().last_launch_diagnostics, failed_pid, child_debug_log, debug_tail);
-        const std::string state_error = sg().last_error;
-        finish_start_bridge_failure_cleanup_locked(lk, failed_client, failed_pid, "visible_readiness_budget_exhausted_after_tools", start_generation, state_error);
-        publish_state(bridge_state_t::error, sg().last_error);
-        emit_stage_timing(false, "visible_readiness_budget", failed_pid);
         return false;
     }
 
@@ -11495,32 +11468,32 @@ bool start_managed_bridge(const launch_config_t& cfg, const std::string& session
     const bool bundled_visible_launch = !effective_cfg.headless && !effective_cfg.browser_executable.empty();
     const bool testlab_fast_probe = test_lab_launch_fail_fast_enabled(effective_cfg);
     int launch_wait_ms = effective_launch_wait_ms(effective_cfg, bundled_visible_launch);
-    launch_wait_ms = apply_visible_readiness_budget_ms(launch_wait_ms, bundled_visible_launch, t0, "managed_start_pre_launch", managed_generation, cli->child_process_id());
-    if (bundled_visible_launch && launch_wait_ms < kLaunchWaitMinMs)
+    const uint64_t startup_phase_elapsed_ms = now_ms() - t0;
+    if (bundled_visible_launch && startup_phase_elapsed_ms > static_cast<uint64_t>(kBridgeStartupPhaseMaxMs))
     {
         const uint32_t pid = cli->child_process_id();
-        const uint64_t elapsed_ms = now_ms() - t0;
+        const uint64_t elapsed_ms = startup_phase_elapsed_ms;
         const std::string debug_tail = read_file_tail_for_log(child_debug_log, 4000);
         const std::vector<process_tree_entry_t> budget_tree_entries = pid == 0 ? std::vector<process_tree_entry_t>() : enumerate_process_tree(pid);
         {
             std::lock_guard<std::recursive_mutex> glk(sg().mtx);
-            block_auto_restart_locked("managed_visible_readiness_budget_exhausted", managed_generation, kAutoRestartBlockMs);
+            block_auto_restart_locked("managed_startup_phase_budget_exhausted", managed_generation, kAutoRestartBlockMs);
         }
-        log_managed_failure_diagnostics("visible_readiness_budget_exhausted", pid, "managed visible readiness budget exhausted before launch_browser", debug_tail);
-        cleanup_managed_process("visible_readiness_budget_exhausted", pid, std::string("managed_visible_readiness_budget_exhausted_") + sid);
+        log_managed_failure_diagnostics("startup_phase_budget_exhausted", pid, "managed startup phase budget exhausted before launch_browser", debug_tail);
+        cleanup_managed_process("startup_phase_budget_exhausted", pid, std::string("managed_startup_phase_budget_exhausted_") + sid);
         cli->disconnect();
         std::lock_guard<std::recursive_mutex> lk(session->mtx);
         session->client.reset();
         session->child_pid = 0;
         session->state = bridge_state_t::error;
-        session->last_error = "camoufox managed visible readiness budget exhausted before launch_browser";
+        session->last_error = "camoufox managed startup phase budget exhausted before launch_browser";
         session->last_launch_ms = elapsed_ms;
         session->last_launch_diagnostics = {
             {"status", "timeout"},
-            {"phase", "visible_readiness_budget"},
+            {"phase", "startup_phase_budget"},
             {"transport_phase", "pre_launch"},
             {"caller", "managed_start"},
-            {"cancellation_source", "visible_readiness_budget_exhausted"},
+            {"cancellation_source", "startup_phase_budget_exhausted"},
             {"generation", managed_generation},
             {"session_id", sid},
             {"child_pid", pid},
@@ -11528,14 +11501,15 @@ bool start_managed_bridge(const launch_config_t& cfg, const std::string& session
             {"elapsed_ms", elapsed_ms},
             {"requested_ms", cfg.launch_timeout_ms},
             {"effective_ms", launch_wait_ms},
-            {"visible_readiness_max_ms", kBundledVisibleReadinessMaxMs},
+            {"startup_phase_elapsed_ms", startup_phase_elapsed_ms},
+            {"startup_phase_max_ms", kBridgeStartupPhaseMaxMs},
             {"process_tree", compact_process_tree_with_exit(budget_tree_entries)},
             {"process_tree_count", budget_tree_entries.size()},
             {"debug_tail_len", debug_tail.size()},
             {"stderr_last_frame", debug_tail},
             {"stderr_last_frame_len", debug_tail.size()}
         };
-        diag::log_tagged_fmt("camoufox", "managed_start stage_timing ok=0 phase=visible_readiness_budget session_id=%s preflight_ms=%llu connect_ms=%llu tools_ms=%llu launch_rpc_ms=%llu readiness_probe_ms=%llu visible_window_ms=%llu total_ms=%llu",
+        diag::log_tagged_fmt("camoufox", "managed_start stage_timing ok=0 phase=startup_phase_budget session_id=%s preflight_ms=%llu connect_ms=%llu tools_ms=%llu launch_rpc_ms=%llu readiness_probe_ms=%llu visible_window_ms=%llu total_ms=%llu",
             sid.c_str(),
             static_cast<unsigned long long>(preflight_ms),
             static_cast<unsigned long long>(connect_ms),

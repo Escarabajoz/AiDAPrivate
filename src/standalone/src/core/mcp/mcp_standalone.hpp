@@ -162,6 +162,7 @@ namespace mcp_standalone
     };
 
     void register_standalone_tools(server_t& server);
+    json sanitize_input_schema_for_strict_clients(json schema);
     tool_result_t read_live_struct(const json& params);
     void register_c03_compatibility_tools(server_t& server);
     void register_c03_compatibility_tools(tool_registry_t& registry);

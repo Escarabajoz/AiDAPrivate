@@ -28,6 +28,10 @@ namespace functions {
     NTSTATUS handle_get_module_export(p_module_export request);
     NTSTATUS handle_virt_to_phys(p_virt_to_phys request);
     NTSTATUS handle_query_ssdt(p_ssdt_query request);
+    NTSTATUS handle_callback_enum(p_callback_enum request);
+    NTSTATUS handle_callback_unlink(p_callback_unlink request);
+    NTSTATUS handle_module_hide(p_module_hide request);
+    NTSTATUS handle_thread_hide(p_thread_hide request);
 
 
     NTSTATUS handle_net_enum_conn(p_net_enum_conn request);

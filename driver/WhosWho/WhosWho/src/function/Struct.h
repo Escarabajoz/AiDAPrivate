@@ -904,6 +904,52 @@ typedef struct _UDP_FLOW_ENTRY {
 } UDP_FLOW_ENTRY, *PUDP_FLOW_ENTRY;
 
 
+#define MAX_CALLBACK_ENTRIES 64
+
+typedef struct _CALLBACK_ENTRY {
+    UINT64 callback_address;
+    UINT64 module_base;
+    UINT32 kind;
+    UINT32 index;
+    UINT32 active;
+    UINT32 padding;
+} CALLBACK_ENTRY, *PCALLBACK_ENTRY;
+static_assert(sizeof(CALLBACK_ENTRY) == 32, "CALLBACK_ENTRY size must be 32 bytes");
+
+typedef struct _CBEN {
+    UINT32 kind;
+    UINT32 entry_count;
+    UINT32 total_count;
+    UINT32 padding;
+    CALLBACK_ENTRY entries[MAX_CALLBACK_ENTRIES];
+} callback_enum, *p_callback_enum;
+
+typedef struct _CBUN {
+    UINT32 kind;
+    UINT32 index;
+    UINT64 callback_address;
+    UINT32 removed;
+    UINT32 padding;
+} callback_unlink, *p_callback_unlink;
+static_assert(sizeof(callback_unlink) == 24, "callback_unlink size must be 24 bytes");
+
+typedef struct _MHID {
+    UINT32 pid;
+    UINT32 hidden;
+    UINT64 module_base;
+    UINT32 result;
+    UINT32 padding;
+} module_hide, *p_module_hide;
+static_assert(sizeof(module_hide) == 24, "module_hide size must be 24 bytes");
+
+typedef struct _THID {
+    UINT32 pid;
+    UINT32 tid;
+    UINT32 hidden;
+    UINT32 result;
+} thread_hide, *p_thread_hide;
+static_assert(sizeof(thread_hide) == 16, "thread_hide size must be 16 bytes");
+
 #pragma pack(pop)
 
 #define DTB_CACHE_SIZE 32

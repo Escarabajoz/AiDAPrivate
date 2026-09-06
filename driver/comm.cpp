@@ -564,6 +564,22 @@ bool voyager::device_t::connect() noexcept {
     diag::log_tagged_critical_fmt("comm-startup",
         "connect_success handle=0x%llX",
         reinterpret_cast<unsigned long long>(driver_handle_));
+
+    // Complete the challenge/response handshake. If it fails, the driver will
+    // reject every subsequent IOCTL, so treat an auth failure as a failed
+    // connection and close the handle.
+    if (!authenticate()) {
+        diag::log_tagged_critical_fmt("comm-startup",
+            "connect_auth_failed handle=0x%llX",
+            reinterpret_cast<unsigned long long>(driver_handle_));
+        CloseHandle(driver_handle_);
+        driver_handle_ = INVALID_HANDLE_VALUE;
+        last_connect_error_ = ERROR_ACCESS_DENIED;
+        return false;
+    }
+    diag::log_tagged_critical_fmt("comm-startup",
+        "connect_auth_ok handle=0x%llX",
+        reinterpret_cast<unsigned long long>(driver_handle_));
     return true;
 }
 void voyager::device_t::disconnect() noexcept {
@@ -5663,4 +5679,158 @@ bool voyager::device_t::drain_debug_events(std::vector<debug_event_record>& out,
     }
 
     return true;
+}
+
+bool voyager::device_t::authenticate() noexcept {
+    if (!is_connected()) {
+        return false;
+    }
+
+    struct auth_request_um {
+        std::uint32_t magic;
+        std::uint32_t reserved;
+        std::uint64_t response;
+        std::uint64_t nonce;
+        std::uint32_t result;
+        std::uint32_t padding;
+    };
+    static_assert(sizeof(auth_request_um) == 32, "auth_request_um must be 32 bytes");
+
+    auth_request_um req{};
+    req.magic = 0x41555448u; // "AUTH"
+    req.reserved = 0;
+    req.response = 0;
+    req.nonce = 0;
+    req.result = 0;
+    req.padding = 0;
+
+    // First round: fetch the boot nonce from the driver.
+    std::uint32_t br = 0;
+    if (!send_ioctl_raw(ioctl_codes::AUTH(), &req, sizeof(req), br)) {
+        return false;
+    }
+    const std::uint64_t nonce = req.nonce;
+
+    // Second round: answer the challenge for our PID.
+    const std::uint64_t pid = static_cast<std::uint64_t>(GetCurrentProcessId());
+    req.response = aida_stealth::auth_response(nonce, pid);
+    req.result = 0;
+    if (!send_ioctl_raw(ioctl_codes::AUTH(), &req, sizeof(req), br)) {
+        return false;
+    }
+    return req.result == 1u;
+}
+
+std::vector<voyager::device_t::callback_entry>
+voyager::device_t::enumerate_callbacks(std::uint32_t kind) noexcept {
+    std::vector<callback_entry> out;
+    if (!is_connected()) {
+        return out;
+    }
+
+    struct callback_enum_um {
+        std::uint32_t kind;
+        std::uint32_t entry_count;
+        std::uint32_t total_count;
+        std::uint32_t padding;
+        struct {
+            std::uint64_t callback_address;
+            std::uint64_t module_base;
+            std::uint32_t kind;
+            std::uint32_t index;
+            std::uint32_t active;
+            std::uint32_t padding;
+        } entries[64];
+    };
+
+    auto buffer = std::make_unique<callback_enum_um>();
+    std::memset(buffer.get(), 0, sizeof(*buffer));
+    buffer->kind = kind;
+
+    if (!send_request(ioctl_codes::CBEN(), buffer.get(),
+                      static_cast<DWORD>(sizeof(*buffer)))) {
+        return out;
+    }
+
+    std::uint32_t count = buffer->entry_count;
+    if (count > 64) count = 64;
+    out.reserve(count);
+    for (std::uint32_t i = 0; i < count; ++i) {
+        callback_entry e;
+        e.callback_address = buffer->entries[i].callback_address;
+        e.module_base = buffer->entries[i].module_base;
+        e.kind = buffer->entries[i].kind;
+        e.index = buffer->entries[i].index;
+        e.active = buffer->entries[i].active;
+        out.push_back(e);
+    }
+    return out;
+}
+
+bool voyager::device_t::unlink_callback(std::uint32_t kind, std::uint32_t index,
+                                        std::uint64_t callback_address) noexcept {
+    if (!is_connected()) {
+        return false;
+    }
+    struct callback_unlink_um {
+        std::uint32_t kind;
+        std::uint32_t index;
+        std::uint64_t callback_address;
+        std::uint32_t removed;
+        std::uint32_t padding;
+    };
+    callback_unlink_um req{};
+    req.kind = kind;
+    req.index = index;
+    req.callback_address = callback_address;
+    req.removed = 0;
+    req.padding = 0;
+    if (!send_request(ioctl_codes::CBUN(), &req, static_cast<DWORD>(sizeof(req)))) {
+        return false;
+    }
+    return req.removed == 1u;
+}
+
+bool voyager::device_t::hide_module(std::uint32_t pid, std::uint64_t module_base) noexcept {
+    if (!is_connected()) {
+        return false;
+    }
+    struct module_hide_um {
+        std::uint32_t pid;
+        std::uint32_t hidden;
+        std::uint64_t module_base;
+        std::uint32_t result;
+        std::uint32_t padding;
+    };
+    module_hide_um req{};
+    req.pid = pid;
+    req.hidden = 0;
+    req.module_base = module_base;
+    req.result = 0;
+    req.padding = 0;
+    if (!send_request(ioctl_codes::MHID(), &req, static_cast<DWORD>(sizeof(req)))) {
+        return false;
+    }
+    return req.result == 1u;
+}
+
+bool voyager::device_t::hide_thread(std::uint32_t pid, std::uint32_t tid) noexcept {
+    if (!is_connected()) {
+        return false;
+    }
+    struct thread_hide_um {
+        std::uint32_t pid;
+        std::uint32_t tid;
+        std::uint32_t hidden;
+        std::uint32_t result;
+    };
+    thread_hide_um req{};
+    req.pid = pid;
+    req.tid = tid;
+    req.hidden = 0;
+    req.result = 0;
+    if (!send_request(ioctl_codes::THID(), &req, static_cast<DWORD>(sizeof(req)))) {
+        return false;
+    }
+    return req.result == 1u;
 }

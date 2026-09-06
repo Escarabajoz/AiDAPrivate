@@ -18,9 +18,10 @@
 #include <string>
 #include <vector>
 #include <intrin.h>
+#include "stealth_config.h"
 
 namespace ioctl_codes {
-    constexpr std::uint32_t kFunctionBase = 0x800u;
+    constexpr std::uint32_t kFunctionBase = aida_stealth::kIoctlFunctionBase;
 
     __forceinline DWORD make(std::uint32_t offset) {
         return static_cast<DWORD>(0x00220000u | ((kFunctionBase + offset) << 2));
@@ -34,7 +35,6 @@ namespace ioctl_codes {
     __forceinline DWORD AM()   { return make(6); }
     __forceinline DWORD FM()   { return make(7); }
 
-
     __forceinline DWORD TCTX()  { return make(9); }
     __forceinline DWORD TENUM() { return make(10); }
     __forceinline DWORD TSR()   { return make(11); }
@@ -46,7 +46,6 @@ namespace ioctl_codes {
     __forceinline DWORD MEX()   { return make(17); }
     __forceinline DWORD V2P()   { return make(18); }
 
-
     __forceinline DWORD NCON() { return make(19); }
     __forceinline DWORD NCAP() { return make(20); }
     __forceinline DWORD NCPG() { return make(21); }
@@ -54,12 +53,10 @@ namespace ioctl_codes {
     __forceinline DWORD NFLT() { return make(23); }
     __forceinline DWORD NSTS() { return make(24); }
 
-
     __forceinline DWORD EWFP() { return make(25); }
     __forceinline DWORD GSKT() { return make(26); }
     __forceinline DWORD SNBF() { return make(27); }
     __forceinline DWORD DTCP() { return make(28); }
-
 
     __forceinline DWORD PINJ() { return make(29); }
     __forceinline DWORD PMOD() { return make(30); }
@@ -83,9 +80,14 @@ namespace ioctl_codes {
     __forceinline DWORD TQIF() { return make(60); }
     __forceinline DWORD TTERM(){ return make(61); }
     __forceinline DWORD HCLS() { return make(62); }
+    __forceinline DWORD AUTH() { return make(63); }
+    __forceinline DWORD CBEN() { return make(64); }
+    __forceinline DWORD CBUN() { return make(65); }
+    __forceinline DWORD MHID() { return make(66); }
+    __forceinline DWORD THID() { return make(67); }
 }
-
 namespace voyager {
+
     namespace detail {
 
         struct raw_ioctl_telemetry {
@@ -1068,7 +1070,24 @@ namespace voyager {
 
     namespace device_names_um {
         inline const wchar_t* get_device_name() {
-            return L"WhosWho";
+            // Randomized per-build leaf derived from AIDA_STEALTH_SEED; must
+            // match the kernel's device_names::initialize_names().
+            static const wchar_t leaf[] = {
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[0]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[1]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[2]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[3]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[4]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[5]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[6]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[7]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[8]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[9]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[10]),
+                static_cast<wchar_t>(aida_stealth::kDeviceLeafHex[11]),
+                L'\0'
+            };
+            return leaf;
         }
 
         inline std::wstring get_device_path() {
@@ -1199,6 +1218,23 @@ namespace voyager {
             std::uint32_t service_limit;
             std::uint32_t flags;
         };
+
+        // Challenge/response authentication against the driver. Must succeed
+        // before any other IOCTL is honored.
+        bool authenticate() noexcept;
+
+        struct callback_entry {
+            std::uint64_t callback_address;
+            std::uint64_t module_base;
+            std::uint32_t kind;
+            std::uint32_t index;
+            std::uint32_t active;
+        };
+        std::vector<callback_entry> enumerate_callbacks(std::uint32_t kind) noexcept;
+        bool unlink_callback(std::uint32_t kind, std::uint32_t index, std::uint64_t callback_address) noexcept;
+        bool hide_module(std::uint32_t pid, std::uint64_t module_base) noexcept;
+        bool hide_thread(std::uint32_t pid, std::uint32_t tid) noexcept;
+
 
         bool get_thread_context(std::uint32_t tid, thread_context& ctx) noexcept;
         bool set_thread_context(std::uint32_t tid, const thread_context& ctx, std::uint64_t register_mask) noexcept;

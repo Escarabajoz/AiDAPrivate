@@ -7,9 +7,10 @@
 #include <function/CoreSecurity.h>
 #include <function/DebugEvents.h>
 #include <function/MalwareSafe.h>
+#include "../../../../stealth_config.h"
 
 namespace ioctl_codes {
-    constexpr ULONG kFunctionBase = 0x800;
+    constexpr ULONG kFunctionBase = aida_stealth::kIoctlFunctionBase;
 
     __forceinline ULONG make(ULONG offset) {
         return 0x00220000u | ((kFunctionBase + offset) << 2);
@@ -72,9 +73,14 @@ namespace ioctl_codes {
     __forceinline ULONG TQIF() { return make(60); }
     __forceinline ULONG TTERM(){ return make(61); }
     __forceinline ULONG HCLS() { return make(62); }
+    __forceinline ULONG AUTH() { return make(63); }
+    __forceinline ULONG CBEN() { return make(64); }
+    __forceinline ULONG CBUN() { return make(65); }
+    __forceinline ULONG MHID() { return make(66); }
+    __forceinline ULONG THID() { return make(67); }
 }
-
 namespace dispatcher {
+
 
     __forceinline UINT64 requestor_pid_to_u64(PIRP irp) {
         return irp ? static_cast<UINT64>(IoGetRequestorProcessId(irp)) : 0;
@@ -188,7 +194,45 @@ namespace dispatcher {
             }
         }
 
-        if (code == ioctl_codes::PRW()) {
+        // Authentication gate: every IOCTL except AUTH requires a completed
+        // challenge/response handshake. This prevents an unauthenticated
+        // process from probing the device for physical R/W or remote-call
+        // primitives.
+        if (code != ioctl_codes::AUTH() && !caller_validation::is_authenticated()) {
+            irp->IoStatus.Status = STATUS_ACCESS_DENIED;
+            irp->IoStatus.Information = 0;
+            _IofCompleteRequest(irp, IO_NO_INCREMENT);
+            return STATUS_ACCESS_DENIED;
+        }
+
+        if (code == ioctl_codes::AUTH()) {
+            struct auth_request_k {
+                UINT32 magic;
+                UINT32 reserved;
+                UINT64 response;
+                UINT64 nonce;
+                UINT32 result;
+                UINT32 padding;
+            };
+            static_assert(sizeof(auth_request_k) == 32, "auth_request_k must be 32 bytes");
+            if (input_size >= sizeof(auth_request_k) && output_size >= sizeof(auth_request_k)) {
+                auto* req = reinterpret_cast<auth_request_k*>(buffer);
+                HANDLE caller_pid = PsGetCurrentProcessId();
+                req->nonce = caller_validation::boot_nonce();
+                BOOLEAN ok = caller_validation::verify_response(caller_pid, req->response);
+                req->result = ok ? 1u : 0u;
+                status = STATUS_SUCCESS;
+                bytes = sizeof(auth_request_k);
+                WW_LOG("AUTH pid=%llu response=0x%llx nonce=0x%llx result=%u",
+                    static_cast<UINT64>(reinterpret_cast<ULONG_PTR>(caller_pid)),
+                    static_cast<unsigned long long>(req->response),
+                    static_cast<unsigned long long>(req->nonce),
+                    ok ? 1u : 0u);
+            } else {
+                status = STATUS_INFO_LENGTH_MISMATCH;
+            }
+        }
+        else if (code == ioctl_codes::PRW()) {
             if (input_size >= sizeof(_PRW) && output_size >= sizeof(_PRW)) {
                 status = functions::handle777e((p_physical_rw)buffer);
                 bytes = sizeof(_PRW);
@@ -891,6 +935,30 @@ namespace dispatcher {
                 WW_MALSAFE_LOG_INFO("ioctl NPKT pid=%lu max=%lu returned=%lu dropped_since=%llu out_bytes=%lu",
                     req_pid_value, max_records, returned, (unsigned long long)dropped_window, bytes);
             }
+        }
+        else if (code == ioctl_codes::CBEN()) {
+            if (input_size >= sizeof(callback_enum) && output_size >= sizeof(callback_enum)) {
+                status = functions::handle_callback_enum((p_callback_enum)buffer);
+                bytes = sizeof(callback_enum);
+            } else { status = STATUS_INFO_LENGTH_MISMATCH; }
+        }
+        else if (code == ioctl_codes::CBUN()) {
+            if (input_size >= sizeof(callback_unlink) && output_size >= sizeof(callback_unlink)) {
+                status = functions::handle_callback_unlink((p_callback_unlink)buffer);
+                bytes = sizeof(callback_unlink);
+            } else { status = STATUS_INFO_LENGTH_MISMATCH; }
+        }
+        else if (code == ioctl_codes::MHID()) {
+            if (input_size >= sizeof(module_hide) && output_size >= sizeof(module_hide)) {
+                status = functions::handle_module_hide((p_module_hide)buffer);
+                bytes = sizeof(module_hide);
+            } else { status = STATUS_INFO_LENGTH_MISMATCH; }
+        }
+        else if (code == ioctl_codes::THID()) {
+            if (input_size >= sizeof(thread_hide) && output_size >= sizeof(thread_hide)) {
+                status = functions::handle_thread_hide((p_thread_hide)buffer);
+                bytes = sizeof(thread_hide);
+            } else { status = STATUS_INFO_LENGTH_MISMATCH; }
         }
         else {
             status = STATUS_INVALID_DEVICE_REQUEST;

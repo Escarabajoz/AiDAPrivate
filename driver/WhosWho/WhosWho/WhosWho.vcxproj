@@ -145,7 +145,7 @@
     <ClCompile Include="src\function\impl\Memory.cpp" />
     <ClCompile Include="src\function\impl\RemoteCall.cpp" />
     <ClCompile Include="src\function\impl\Debugger.cpp" />
-    <ClCompile Include="src\function\impl\Network.cpp" />
+    <ClCompile Include="src\function\impl\Stealth.cpp" />
     <ClCompile Include="src\function\KernelDebugCapture.cpp" />
   </ItemGroup>
   <ItemGroup>

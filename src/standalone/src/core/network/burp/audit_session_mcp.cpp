@@ -410,7 +410,8 @@ bool close_session(const std::string& id, const std::string& reason, session_t& 
         update.has_notes = true;
         update.notes = reason;
         session_t ignored;
-        update_session(id, update, ignored);
+        if (!update_session(id, update, ignored))
+            return false;
     }
     audit_session::session_t closed;
     if (!audit_session::close(id, closed)) {
@@ -855,6 +856,12 @@ void register_one(mcp_standalone::server_t& srv,
 
 mcp_standalone::tool_result_t tool_create(const json& params)
 {
+    if (!params.is_object())
+        return mcp_standalone::tool_result_t::error("parameters must be an object");
+    if (params.contains("metadata") && !params["metadata"].is_object())
+        return mcp_standalone::tool_result_t::error("metadata must be an object");
+    if (params.contains("targets") && !params["targets"].is_array())
+        return mcp_standalone::tool_result_t::error("targets must be an array");
     const std::string id = create_session(
         params.value("title", params.value("name", std::string("Web Audit Session"))),
         params.value("client", std::string()),
@@ -866,16 +873,30 @@ mcp_standalone::tool_result_t tool_create(const json& params)
     if (params.contains("targets") && params["targets"].is_array()) {
         for (const auto& jt : params["targets"]) {
             if (!jt.is_object())
-                continue;
+            {
+                delete_session(id);
+                return mcp_standalone::tool_result_t::error("each target must be an object");
+            }
             target_t target = target_from_params(jt);
-            if (!target.host.empty()) {
-                target_t stored;
-                add_target(id, target, stored);
+            if (target.host.empty())
+            {
+                delete_session(id);
+                return mcp_standalone::tool_result_t::error("each target requires host or target_url");
+            }
+            target_t stored;
+            if (!add_target(id, target, stored)) {
+                const std::string error = last_error().empty() ? "target add failed" : last_error();
+                delete_session(id);
+                return mcp_standalone::tool_result_t::error(error);
             }
         }
     }
     session_t session;
-    get_session(id, session);
+    if (!get_session(id, session)) {
+        const std::string error = last_error().empty() ? "created session could not be loaded" : last_error();
+        delete_session(id);
+        return mcp_standalone::tool_result_t::error(error);
+    }
     json out;
     out["session"] = session_to_json(session, true);
     out["session_id"] = id;
@@ -900,7 +921,16 @@ mcp_standalone::tool_result_t tool_list(const json& params)
     if (!filter.status.empty() && !valid_public_status(filter.status))
         return mcp_standalone::tool_result_t::error("invalid status: expected open, active, paused, or closed");
     filter.include_closed = params.value("include_closed", true);
-    filter.limit = static_cast<size_t>(params.value("limit", 128));
+    {
+        if (params.contains("limit")) {
+            if (!params["limit"].is_number_integer()) return mcp_standalone::tool_result_t::error("limit must be an integer");
+            long long v = params["limit"].get<long long>();
+            if (v < 0 || v > 10000) return mcp_standalone::tool_result_t::error("limit must be in 0..10000");
+            filter.limit = static_cast<size_t>(v);
+        } else {
+            filter.limit = 128;
+        }
+    }
     const auto sessions = list_sessions(filter);
     json out;
     out["count"] = sessions.size();
@@ -1006,7 +1036,10 @@ mcp_standalone::tool_result_t tool_target_list(const json& params)
     const std::string id = session_id_from_params(params);
     if (id.empty())
         return mcp_standalone::tool_result_t::error("session_id is required");
-    const auto targets = list_targets(id);
+    session_t session;
+    if (!get_session(id, session))
+        return mcp_standalone::tool_result_t::error(last_error().empty() ? "session not found" : last_error());
+    const auto& targets = session.targets;
     json out;
     out["session_id"] = id;
     out["count"] = targets.size();

@@ -57,19 +57,23 @@ inline std::wstring& last_custom_bridge_dir() {
 
 inline std::wstring widen_utf8(const char* utf8) {
 	if (!utf8 || !*utf8) return std::wstring();
-	int needed = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, nullptr, 0);
+	int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, nullptr, 0);
 	if (needed <= 1) return std::wstring();
-	std::wstring out(static_cast<size_t>(needed - 1), L'\0');
-	MultiByteToWideChar(CP_UTF8, 0, utf8, -1, out.data(), needed);
+	std::wstring out(static_cast<size_t>(needed), L'\0');
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8, -1, out.data(), needed) != needed)
+		return {};
+	out.resize(static_cast<size_t>(needed - 1));
 	return out;
 }
 
 inline std::string narrow_utf8(const wchar_t* w) {
 	if (!w || !*w) return std::string();
-	int needed = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
+	int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, nullptr, 0, nullptr, nullptr);
 	if (needed <= 1) return std::string();
-	std::string out(static_cast<size_t>(needed - 1), '\0');
-	WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), needed, nullptr, nullptr);
+	std::string out(static_cast<size_t>(needed), '\0');
+	if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w, -1, out.data(), needed, nullptr, nullptr) != needed)
+		return {};
+	out.resize(static_cast<size_t>(needed - 1));
 	return out;
 }
 

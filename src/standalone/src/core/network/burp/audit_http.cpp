@@ -366,7 +366,9 @@ bool send_all(SOCKET s, const uint8_t* data, size_t len, int timeout_ms)
     size_t off = 0;
     while (off < len) {
         if (!wait_socket(s, static_cast<int>(deadline - now_steady_ms()), true)) return false;
-        int n = ::send(s, reinterpret_cast<const char*>(data + off), static_cast<int>(len - off), 0);
+        const size_t remaining = len - off;
+        const size_t chunk = remaining > static_cast<size_t>(INT_MAX) ? static_cast<size_t>(INT_MAX) : remaining;
+        int n = ::send(s, reinterpret_cast<const char*>(data + off), static_cast<int>(chunk), 0);
         if (n <= 0) {
             int err = WSAGetLastError();
             if (err == WSAEWOULDBLOCK) {
@@ -386,7 +388,9 @@ bool ssl_send_all(SSL* ssl, const uint8_t* data, size_t len, SOCKET s, int timeo
     uint64_t deadline = now_steady_ms() + static_cast<uint64_t>(timeout_ms);
     size_t off = 0;
     while (off < len) {
-        int n = SSL_write(ssl, data + off, static_cast<int>(len - off));
+        const size_t remaining = len - off;
+        const size_t chunk = remaining > static_cast<size_t>(INT_MAX) ? static_cast<size_t>(INT_MAX) : remaining;
+        int n = SSL_write(ssl, data + off, static_cast<int>(chunk));
         if (n > 0) { off += static_cast<size_t>(n); continue; }
         int err = SSL_get_error(ssl, n);
         if (err == SSL_ERROR_WANT_READ) {
@@ -455,7 +459,14 @@ bool recv_until_complete(SOCKET s, std::vector<uint8_t>& buf, int timeout_ms)
         }
         if (headers_done) {
             if (content_length >= 0) {
-                size_t total_expected = header_end + static_cast<size_t>(content_length);
+                if (static_cast<unsigned long long>(content_length) > kMaxResp) {
+                    content_length = static_cast<long long>(kMaxResp);
+                }
+                const size_t cl_size = static_cast<size_t>(content_length);
+                if (cl_size > kMaxResp || header_end > kMaxResp - cl_size) {
+                    break;
+                }
+                size_t total_expected = header_end + cl_size;
                 if (buf.size() >= total_expected) break;
             } else if (chunked) {
                 if (buf.size() >= 5 && std::memcmp(buf.data() + buf.size() - 5, "0\r\n\r\n", 5) == 0) break;
@@ -512,7 +523,14 @@ bool ssl_recv_until_complete(SSL* ssl, SOCKET s, std::vector<uint8_t>& buf, int 
             }
             if (headers_done) {
                 if (content_length >= 0) {
-                    size_t total_expected = header_end + static_cast<size_t>(content_length);
+                    if (static_cast<unsigned long long>(content_length) > kMaxResp) {
+                        content_length = static_cast<long long>(kMaxResp);
+                    }
+                    const size_t cl_size = static_cast<size_t>(content_length);
+                    if (cl_size > kMaxResp || header_end > kMaxResp - cl_size) {
+                        break;
+                    }
+                    size_t total_expected = header_end + cl_size;
                     if (buf.size() >= total_expected) break;
                 } else if (chunked) {
                     if (buf.size() >= 5 && std::memcmp(buf.data() + buf.size() - 5, "0\r\n\r\n", 5) == 0) break;
@@ -648,7 +666,14 @@ bool parse_url(const std::string& url,
         port = (scheme == "https") ? 443 : 80;
     } else {
         host = authority.substr(0, colon);
-        try { port = static_cast<uint16_t>(std::stoul(authority.substr(colon + 1))); }
+        try {
+            unsigned long parsed_port = std::stoul(authority.substr(colon + 1));
+            if (parsed_port == 0 || parsed_port > 65535) {
+                diag::log_tagged_fmt("audit_http", "parse_url invalid_port authority=%s", authority.c_str());
+                return false;
+            }
+            port = static_cast<uint16_t>(parsed_port);
+        }
         catch (...) {
             diag::log_tagged_fmt("audit_http", "parse_url invalid_port authority=%s", authority.c_str());
             return false;

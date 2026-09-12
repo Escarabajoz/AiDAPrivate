@@ -15919,6 +15919,7 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
 
 bool server_t::start(int port)
 {
+    std::unique_lock<std::mutex> lifecycle_lock(_lifecycle_mtx);
     diag::log_tagged_fmt("mcp_srv", "start entry port=%d", port);
     if (_running.load())
     {
@@ -15941,7 +15942,7 @@ bool server_t::start(int port)
     }
 
     _stop_requested = false;
-    _port = 0;
+    _port.store(0, std::memory_order_release);
 
     if (!rotate_local_capability()) {
         diag::log_tagged("mcp_srv", "start rejected local capability generation failed");
@@ -16030,14 +16031,17 @@ bool server_t::start(int port)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     diag::log_tagged_fmt("mcp_srv", "start result running=%d port=%d",
-        (int)_running.load(), _port);
+        (int)_running.load(), _port.load(std::memory_order_acquire));
     return _running.load();
 }
 
 void server_t::stop()
 {
-    diag::log_tagged_fmt("mcp_srv", "stop entry running=%d", (int)_running.load());
     const bool on_server_worker = _server_worker_tid.load(std::memory_order_acquire) == static_cast<std::uint32_t>(GetCurrentThreadId());
+    std::unique_lock<std::mutex> lifecycle_lock(_lifecycle_mtx, std::defer_lock);
+    if (!on_server_worker)
+        lifecycle_lock.lock();
+    diag::log_tagged_fmt("mcp_srv", "stop entry running=%d", (int)_running.load());
     if (!_running.load() && _server_done.load(std::memory_order_acquire))
     {
         mcp_standalone::downstream::governor_t::instance().request_shutdown();
@@ -16198,7 +16202,7 @@ void server_t::server_thread_func(int port)
         auth_input.origin = req.get_header_value("Origin");
         auth_input.authorization = req.get_header_value("Authorization");
         auth_input.run_binding = req.get_header_value("X-AiDA-MCP-Run-Id");
-        auth_input.bound_port = _port;
+        auth_input.bound_port = _port.load(std::memory_order_acquire);
         const auto auth = authorize_local_request(
             auth_input, local_capability, run_binding);
         if (!auth_input.authorization.empty())
@@ -16547,7 +16551,7 @@ void server_t::server_thread_func(int port)
         proof["challenge"] = request.value("challenge", std::string());
         proof["plugin_pid"] = plugin_pid;
         proof["standalone_pid"] = static_cast<uint32_t>(GetCurrentProcessId());
-        proof["mcp_port"] = static_cast<uint32_t>(_port);
+        proof["mcp_port"] = static_cast<uint32_t>(_port.load(std::memory_order_acquire));
         proof["issued_tick_ms"] = now_tick;
         proof["expires_tick_ms"] = now_tick + 15000ull;
         proof["lifecycle_ready"] = g_ide_lifecycle_ready.load(std::memory_order_acquire);
@@ -16602,7 +16606,7 @@ void server_t::server_thread_func(int port)
         health["server"]      = SERVER_NAME;
         health["version"]     = SERVER_VERSION;
         health["pid"]         = static_cast<std::uint32_t>(GetCurrentProcessId());
-        health["port"]        = _port;
+        health["port"]        = _port.load(std::memory_order_acquire);
         health["authenticated"] = lifecycle_ready;
         health["lifecycle_ready"] = lifecycle_ready;
         health["tools_count"] = g_cached_external_tool_count.load(std::memory_order_acquire);
@@ -16627,7 +16631,7 @@ void server_t::server_thread_func(int port)
         mcp_capacity_snapshot_state_t capacity_state;
         capacity_state.timestamp_ms = mcp_now_ms();
         health["executors"] = mcp_executor_health_snapshot(&capacity_state);
-        health["capacity"] = capacity_health_snapshot(current_mcp_principal(), session_id, _port, capacity_state);
+        health["capacity"] = capacity_health_snapshot(current_mcp_principal(), session_id, _port.load(std::memory_order_acquire), capacity_state);
         health["lease_registry"] = mcp_lease_registry_bounded_snapshot(16, 16);
         health["lease_registry_owner"] = mcp_lease_registry_lock_owner_diagnostics_json();
         health["reserved_lanes"] = mcp_reserved_lanes_health_snapshot();
@@ -17487,7 +17491,7 @@ void server_t::server_thread_func(int port)
         return;
     }
 
-    _port = bound_port;
+    _port.store(bound_port, std::memory_order_release);
     _running = true;
     size_t external_tools = 0;
     for (const auto& t : _registry.snapshot_tools())
@@ -17653,10 +17657,22 @@ static bool write_string_to_file(const std::string& path, const std::string& con
     const std::uint64_t sequence = write_sequence.fetch_add(1, std::memory_order_acq_rel) + 1U;
     const std::filesystem::path temporary = target.wstring() + L".aida-" +
         std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(sequence) + L".tmp";
-    HANDLE file = CreateFileW(
+    struct file_handle_guard_t {
+        HANDLE value = INVALID_HANDLE_VALUE;
+        explicit file_handle_guard_t(HANDLE handle) noexcept : value(handle) {}
+        ~file_handle_guard_t() noexcept { close(); }
+        void close() noexcept {
+            if (value != INVALID_HANDLE_VALUE) {
+                ::CloseHandle(value);
+                value = INVALID_HANDLE_VALUE;
+            }
+        }
+        file_handle_guard_t(const file_handle_guard_t&) = delete;
+        file_handle_guard_t& operator=(const file_handle_guard_t&) = delete;
+    } file(CreateFileW(
         temporary.c_str(), GENERIC_WRITE, 0, &attributes, CREATE_NEW,
-        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+        FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_WRITE_THROUGH, nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) {
         LocalFree(acl);
         return false;
     }
@@ -17667,7 +17683,7 @@ static bool write_string_to_file(const std::string& path, const std::string& con
             content.size() - offset,
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
         DWORD completed = 0;
-        if (!WriteFile(file, content.data() + offset, chunk, &completed, nullptr) ||
+        if (!WriteFile(file.value, content.data() + offset, chunk, &completed, nullptr) ||
             completed != chunk) {
             written = false;
             break;
@@ -17675,18 +17691,19 @@ static bool write_string_to_file(const std::string& path, const std::string& con
         offset += completed;
     }
     if (written)
-        written = FlushFileBuffers(file) != FALSE;
-    CloseHandle(file);
+        written = FlushFileBuffers(file.value) != FALSE;
+    file.close();
     if (written) {
-        written = MoveFileExW(
-            temporary.c_str(), target.c_str(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
-    }
-    if (written) {
-        written = SetNamedSecurityInfoW(
-            const_cast<LPWSTR>(target.c_str()), SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            nullptr, nullptr, acl, nullptr) == ERROR_SUCCESS;
+        if (SetNamedSecurityInfoW(
+                const_cast<LPWSTR>(temporary.c_str()), SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                nullptr, nullptr, acl, nullptr) != ERROR_SUCCESS) {
+            written = false;
+        } else {
+            written = MoveFileExW(
+                temporary.c_str(), target.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+        }
     }
     if (!written)
         DeleteFileW(temporary.c_str());
@@ -17816,7 +17833,10 @@ static bool write_mcpservers(const std::string& path, const std::string& url,
                              const char* key, const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, false);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, false);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("mcpServers") || !config["mcpServers"].is_object())
         config["mcpServers"] = json::object();
@@ -17846,7 +17866,10 @@ static bool write_opencode(const std::string& path, const std::string& url,
                            const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, true);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, true);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("mcp") || !config["mcp"].is_object())
         config["mcp"] = json::object();
@@ -17860,7 +17883,10 @@ static bool write_vscode(const std::string& path, const std::string& url,
                          const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, true);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, true);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("mcp") || !config["mcp"].is_object()) config["mcp"] = json::object();
     if (!config["mcp"].contains("servers") || !config["mcp"]["servers"].is_object())
@@ -17875,7 +17901,10 @@ static bool write_vscode_json(const std::string& path, const std::string& url,
                               const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, true);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, true);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("servers") || !config["servers"].is_object())
         config["servers"] = json::object();
@@ -17889,7 +17918,10 @@ static bool write_cline(const std::string& path, const std::string& url,
                         const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, false);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, false);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("mcpServers") || !config["mcpServers"].is_object())
         config["mcpServers"] = json::object();
@@ -17906,7 +17938,10 @@ static bool write_zed(const std::string& path, const std::string& url,
                       const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, true);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, true);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("context_servers") || !config["context_servers"].is_object())
         config["context_servers"] = json::object();
@@ -17950,7 +17985,10 @@ static bool write_claude_code(const std::string& path, const std::string& url,
                               const client_handoff_t& handoff)
 {
     json config;
-    if (std::filesystem::exists(path)) parse_json_file(path, config, false);
+    bool exists = std::filesystem::exists(path);
+    bool parsed = false;
+    if (exists) parsed = parse_json_file(path, config, false);
+    if (exists && !parsed) return false;
     if (!config.is_object()) config = json::object();
     if (!config.contains("mcpServers") || !config["mcpServers"].is_object())
         config["mcpServers"] = json::object();
@@ -17967,7 +18005,7 @@ void server_t::write_client_configs() const
         return;
     }
 
-    std::string port_str = std::to_string(_port);
+    std::string port_str = std::to_string(_port.load(std::memory_order_acquire));
     std::string http_url = "http://127.0.0.1:" + port_str + "/mcp";
     std::string sse_url = "http://127.0.0.1:" + port_str + "/sse";
     std::string capability;

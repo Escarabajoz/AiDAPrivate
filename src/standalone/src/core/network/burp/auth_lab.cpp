@@ -811,6 +811,16 @@ std::string digest_solve(const std::string& method,
 std::string ntlm_type1(const std::string& domain, const std::string& workstation)
 {
     diag::log_tagged_fmt("auth_lab", "ntlm_type1 entry domain=%s workstation=%s", domain.c_str(), workstation.c_str());
+    if (domain.size() > 65535 || workstation.size() > 65535) {
+        diag::log_tagged_fmt("auth_lab", "ntlm_type1 rejected oversized domain=%zu workstation=%zu", domain.size(), workstation.size());
+        set_err("ntlm_type1: domain/workstation too large");
+        return std::string();
+    }
+    if (domain.size() + workstation.size() > 65535 - 32) {
+        diag::log_tagged_fmt("auth_lab", "ntlm_type1 rejected combined size domain=%zu workstation=%zu", domain.size(), workstation.size());
+        set_err("ntlm_type1: combined fields too large");
+        return std::string();
+    }
     std::vector<uint8_t> msg;
     msg.reserve(64);
     const char sig[] = "NTLMSSP";
@@ -985,6 +995,18 @@ std::string ntlm_type3(const std::string& type2_b64,
     std::vector<uint8_t> domain_utf16 = utf16le(domain);
     std::vector<uint8_t> ws_utf16 = utf16le(workstation);
     std::vector<uint8_t> session_key(16, 0);
+    auto will_overflow_u32 = [](size_t v) { return v > static_cast<size_t>(UINT32_MAX); };
+    auto will_overflow_u16 = [](size_t v) { return v > 65535; };
+    if (will_overflow_u16(domain_utf16.size()) || will_overflow_u16(user_utf16.size()) ||
+        will_overflow_u16(ws_utf16.size()) || will_overflow_u16(lm_response.size()) ||
+        will_overflow_u16(nt_response.size()) || will_overflow_u16(session_key.size()) ||
+        will_overflow_u32(domain_utf16.size()) || will_overflow_u32(user_utf16.size()) ||
+        will_overflow_u32(ws_utf16.size()) || will_overflow_u32(lm_response.size()) ||
+        will_overflow_u32(nt_response.size()) || will_overflow_u32(session_key.size())) {
+        diag::log_tagged_fmt("auth_lab", "ntlm_type3 rejected oversized field sizes");
+        set_err("ntlm_type3: field too large");
+        return std::string();
+    }
 
     const uint32_t header_size = 64;
     const uint32_t off_domain = header_size;
@@ -994,6 +1016,11 @@ std::string ntlm_type3(const std::string& type2_b64,
     const uint32_t off_nt = off_lm + static_cast<uint32_t>(lm_response.size());
     const uint32_t off_sk = off_nt + static_cast<uint32_t>(nt_response.size());
     const uint32_t total = off_sk + static_cast<uint32_t>(session_key.size());
+    if (total < header_size || total > 65535 + 64) {
+        diag::log_tagged_fmt("auth_lab", "ntlm_type3 rejected total size %u", total);
+        set_err("ntlm_type3: total message too large");
+        return std::string();
+    }
 
     std::vector<uint8_t> msg(total, 0);
     std::memcpy(msg.data(), "NTLMSSP\0", 8);

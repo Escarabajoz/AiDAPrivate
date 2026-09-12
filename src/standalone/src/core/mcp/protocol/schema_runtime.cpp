@@ -344,10 +344,20 @@ schema_runtime_t::schema_runtime_t(schema_runtime_t&&) noexcept = default;
 schema_runtime_t& schema_runtime_t::operator=(schema_runtime_t&&) noexcept = default;
 
 schema_validation_t schema_runtime_t::compile(const json& schema) {
+    if (!impl_) {
+        schema_validation_t result;
+        add_error(result, "(runtime)", "state", "schema runtime is moved-from");
+        return result;
+    }
     return impl_->acquire(schema)->setup;
 }
 
 schema_validation_t schema_runtime_t::validate(const json& schema, const json& instance) {
+    if (!impl_) {
+        schema_validation_t result;
+        add_error(result, "(runtime)", "state", "schema runtime is moved-from");
+        return result;
+    }
     const auto compiled = impl_->acquire(schema);
     if (!compiled->setup.valid || !compiled->validator) {
         return compiled->setup;
@@ -366,6 +376,8 @@ schema_validation_t schema_runtime_t::validate(const json& schema, const json& i
 }
 
 schema_cache_stats_t schema_runtime_t::cache_stats() const {
+    if (!impl_)
+        return {};
     std::lock_guard<std::mutex> lock(impl_->cache_mutex);
     schema_cache_stats_t result = impl_->statistics;
     result.entries = impl_->cache.size();
@@ -373,6 +385,8 @@ schema_cache_stats_t schema_runtime_t::cache_stats() const {
 }
 
 void schema_runtime_t::clear() {
+    if (!impl_)
+        return;
     std::lock_guard<std::mutex> lock(impl_->cache_mutex);
     impl_->cache.clear();
     impl_->statistics.entries = 0;

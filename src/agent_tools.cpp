@@ -18,10 +18,15 @@
 // Slice C12 — bring in taint engine public surface for taint_tools_ext.
 #include "vuln/taint_engine.hpp"
 #include <allins.hpp>
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <loader.hpp>
 #include <chrono>
 #include <netnode.hpp>
+#include <set>
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4267)
@@ -35,6 +40,36 @@ using json = nlohmann::json;
 
 namespace agent_tools
 {
+
+inline int safe_json_int_value(const json& v, int fallback)
+{
+    if (v.is_number_integer())
+    {
+        const std::int64_t value = v.get<std::int64_t>();
+        if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+            return static_cast<int>(value);
+    }
+    else if (v.is_number_unsigned())
+    {
+        const std::uint64_t value = v.get<std::uint64_t>();
+        if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+            return static_cast<int>(value);
+    }
+    else if (v.is_number_float())
+    {
+        const double value = v.get<double>();
+        if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+            return static_cast<int>(value);
+    }
+    return fallback;
+}
+
+inline int safe_json_int_param(const json& params, const char* key, int fallback)
+{
+    if (!params.is_object() || !params.contains(key))
+        return fallback;
+    return safe_json_int_value(params.at(key), fallback);
+}
 
 static func_t* get_func(ea_t ea)
 {
@@ -413,7 +448,7 @@ void ToolRegistry::register_tool(const tool_definition_t& tool)
     const bool manage_name = normalized.name.size() > 11
         && normalized.name.rfind("ida_", 0) == 0
         && normalized.name.compare(normalized.name.size() - 7, 7, "_manage") == 0;
-    if (manage_name)
+    if (manage_name && normalized.visibility == "legacy")
         normalized.visibility = "public";
     if (normalized.category == "session")
         normalized.visibility = "internal";
@@ -434,6 +469,33 @@ void ToolRegistry::register_tool(const tool_definition_t& tool)
     {
         aida_ipc::trace_breadcrumb("agent_tools: register_tool REJECTED impossible metadata name=%s read_only=1 destructive=1", normalized.name.c_str());
         msg("AiDA ToolRegistry: rejected impossible metadata name=%s read_only=1 destructive=1\n", normalized.name.c_str());
+        return;
+    }
+
+    static const std::set<std::string> supported_types = {
+        "array", "boolean", "integer", "number", "object", "string"
+    };
+    std::set<std::string> parameter_names;
+    for (const auto& param : normalized.parameters)
+    {
+        if (param.name.empty() || supported_types.find(param.type) == supported_types.end()
+            || !parameter_names.insert(param.name).second)
+        {
+            aida_ipc::trace_breadcrumb("agent_tools: register_tool REJECTED invalid parameter metadata name=%s param=%s type=%s",
+                normalized.name.c_str(), param.name.c_str(), param.type.c_str());
+            msg("AiDA ToolRegistry: rejected invalid parameter metadata tool=%s param=%s type=%s\n",
+                normalized.name.c_str(), param.name.c_str(), param.type.c_str());
+            return;
+        }
+    }
+
+    if (normalized.visibility != "public" && normalized.visibility != "legacy"
+        && normalized.visibility != "internal")
+    {
+        aida_ipc::trace_breadcrumb("agent_tools: register_tool REJECTED invalid visibility name=%s visibility=%s",
+            normalized.name.c_str(), normalized.visibility.c_str());
+        msg("AiDA ToolRegistry: rejected invalid visibility tool=%s visibility=%s\n",
+            normalized.name.c_str(), normalized.visibility.c_str());
         return;
     }
 
@@ -610,7 +672,7 @@ tool_result_t ToolRegistry::execute_tool(const std::string& name, const json& pa
         if (param.required && !sanitized_params.contains(param.name))
         {
             aida_ipc::trace_breadcrumb("agent_tools: execute_tool FAIL missing param tool=%s param=%s", name.c_str(), param.name.c_str());
-            return tool_result_t::error(std::string("Missing required parameter: ") + param.name);
+            return tool_result_t::error(std::string("Missing required parameter: ") + param.name, "bad_param");
         }
 
         if (sanitized_params.contains(param.name))
@@ -627,11 +689,23 @@ tool_result_t ToolRegistry::execute_tool(const std::string& name, const json& pa
                 else if (param.type == "array")
                     val = json::array();
             }
-            else if (param.type == "string" && val.is_number_integer())
+            else if (param.type == "string" && val.is_number_unsigned())
             {
                 std::ostringstream ss;
                 ss << "0x" << std::hex << val.get<uint64_t>();
                 val = ss.str();
+            }
+            else if (param.type == "string" && val.is_number_integer())
+            {
+                const auto signed_value = val.get<int64_t>();
+                if (signed_value < 0)
+                    val = std::to_string(signed_value);
+                else
+                {
+                    std::ostringstream ss;
+                    ss << "0x" << std::hex << static_cast<uint64_t>(signed_value);
+                    val = ss.str();
+                }
             }
             else if (param.type == "string" && val.is_number())
             {
@@ -641,13 +715,54 @@ tool_result_t ToolRegistry::execute_tool(const std::string& name, const json& pa
             {
                 std::string sv = val.get<std::string>();
                 try {
+                    size_t consumed = 0;
                     if (sv.size() > 2 && sv[0] == '0' && (sv[1] == 'x' || sv[1] == 'X'))
-                        val = static_cast<uint64_t>(std::stoull(sv, nullptr, 16));
+                        val = static_cast<uint64_t>(std::stoull(sv, &consumed, 16));
+                    else if (!sv.empty() && sv[0] == '-')
+                        val = static_cast<int64_t>(std::stoll(sv, &consumed, 0));
                     else if (!sv.empty())
-                        val = static_cast<uint64_t>(std::stoull(sv, nullptr, 0));
+                        val = static_cast<uint64_t>(std::stoull(sv, &consumed, 0));
                     else
-                        val = 0;
-                } catch (...) { val = 0; }
+                        return tool_result_t::error(
+                            std::string("Invalid numeric value for parameter '") + param.name + "'",
+                            "bad_param");
+                    if (consumed != sv.size())
+                        return tool_result_t::error(
+                            std::string("Invalid numeric value for parameter '") + param.name + "'",
+                            "bad_param");
+                } catch (...) {
+                    return tool_result_t::error(
+                        std::string("Invalid numeric value for parameter '") + param.name + "'",
+                        "bad_param");
+                }
+            }
+
+            const bool type_valid =
+                (param.type == "string" && val.is_string())
+                || (param.type == "number" && val.is_number())
+                || (param.type == "integer" && (val.is_number_integer() || val.is_number_unsigned()))
+                || (param.type == "boolean" && val.is_boolean())
+                || (param.type == "array" && val.is_array())
+                || (param.type == "object" && val.is_object());
+            if (!type_valid)
+            {
+                aida_ipc::trace_breadcrumb("agent_tools: execute_tool FAIL invalid type tool=%s param=%s expected=%s",
+                    name.c_str(), param.name.c_str(), param.type.c_str());
+                return tool_result_t::error(
+                    std::string("Invalid type for parameter '") + param.name + "': expected " + param.type,
+                    "bad_param");
+            }
+            if (!param.enum_values.empty())
+            {
+                if (!val.is_string()
+                    || std::find(param.enum_values.begin(), param.enum_values.end(), val.get<std::string>()) == param.enum_values.end())
+                {
+                    aida_ipc::trace_breadcrumb("agent_tools: execute_tool FAIL invalid enum tool=%s param=%s",
+                        name.c_str(), param.name.c_str());
+                    return tool_result_t::error(
+                        std::string("Invalid value for parameter '") + param.name + "'",
+                        "bad_param");
+                }
             }
         }
     }
@@ -663,6 +778,11 @@ tool_result_t ToolRegistry::execute_tool(const std::string& name, const json& pa
     {
         aida_ipc::trace_breadcrumb("agent_tools: execute_tool EXCEPTION name=%s what=%s", name.c_str(), e.what());
         return attach_deprecated_metadata(*tool, tool_result_t::error(std::string("Tool execution error: ") + e.what()));
+    }
+    catch (...)
+    {
+        aida_ipc::trace_breadcrumb("agent_tools: execute_tool EXCEPTION name=%s non_std=1", name.c_str());
+        return attach_deprecated_metadata(*tool, tool_result_t::error("Tool execution error: unknown exception", "unknown"));
     }
 }
 
@@ -8535,8 +8655,28 @@ tool_result_t search_semantic(const json& params)
     if (query.empty()) return tool_result_t::error(std::string("Missing query parameter"));
 
     int limit = 10;
-    if (params.contains("limit") && params["limit"].is_number())
-        limit = params["limit"].get<int>();
+    if (params.contains("limit"))
+    {
+        const auto& v = params["limit"];
+        if (v.is_number_integer())
+        {
+            const std::int64_t value = v.get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                limit = static_cast<int>(value);
+        }
+        else if (v.is_number_unsigned())
+        {
+            const std::uint64_t value = v.get<std::uint64_t>();
+            if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                limit = static_cast<int>(value);
+        }
+        else if (v.is_number_float())
+        {
+            const double value = v.get<double>();
+            if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                limit = static_cast<int>(value);
+        }
+    }
 
     std::string hash = get_current_binary_hash();
     if (hash.empty()) return tool_result_t::error(std::string("No binary loaded"));
@@ -8556,8 +8696,28 @@ tool_result_t get_similar_functions(const json& params)
     if (!addr) return tool_result_t::error(std::string("Invalid address"));
 
     int limit = 5;
-    if (params.contains("limit") && params["limit"].is_number())
-        limit = params["limit"].get<int>();
+    if (params.contains("limit"))
+    {
+        const auto& v = params["limit"];
+        if (v.is_number_integer())
+        {
+            const std::int64_t value = v.get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                limit = static_cast<int>(value);
+        }
+        else if (v.is_number_unsigned())
+        {
+            const std::uint64_t value = v.get<std::uint64_t>();
+            if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                limit = static_cast<int>(value);
+        }
+        else if (v.is_number_float())
+        {
+            const double value = v.get<double>();
+            if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                limit = static_cast<int>(value);
+        }
+    }
 
     std::string hash = get_current_binary_hash();
     if (hash.empty()) return tool_result_t::error(std::string("No binary loaded"));
@@ -8577,8 +8737,28 @@ tool_result_t get_call_context(const json& params)
     if (!addr) return tool_result_t::error(std::string("Invalid address"));
 
     int depth = 2;
-    if (params.contains("depth") && params["depth"].is_number())
-        depth = params["depth"].get<int>();
+    if (params.contains("depth"))
+    {
+        const auto& v = params["depth"];
+        if (v.is_number_integer())
+        {
+            const std::int64_t value = v.get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                depth = static_cast<int>(value);
+        }
+        else if (v.is_number_unsigned())
+        {
+            const std::uint64_t value = v.get<std::uint64_t>();
+            if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                depth = static_cast<int>(value);
+        }
+        else if (v.is_number_float())
+        {
+            const double value = v.get<double>();
+            if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                depth = static_cast<int>(value);
+        }
+    }
 
     std::string hash = get_current_binary_hash();
     if (hash.empty()) return tool_result_t::error(std::string("No binary loaded"));
@@ -8691,8 +8871,7 @@ tool_result_t run_taint_analysis(const json& params)
     if (hash.empty()) return tool_result_t::error(std::string("No binary loaded"));
 
     int max_paths = 20;
-    if (params.contains("max_paths") && params["max_paths"].is_number())
-        max_paths = params["max_paths"].get<int>();
+    max_paths = safe_json_int_param(params, "max_paths", max_paths);
 
     auto& store = graphrag::GraphStore::instance();
     graphrag::TaintAnalyzer analyzer(store);
@@ -8895,10 +9074,8 @@ tool_result_t get_security_overview(const json& params)
     if (hash.empty()) return tool_result_t::error(std::string("No binary loaded"));
 
     int limit = 50;
-    if (params.contains("limit") && params["limit"].is_number())
-        limit = params["limit"].get<int>();
-
-    auto& store = graphrag::GraphStore::instance();
+    limit = safe_json_int_param(params, "limit", limit);
+auto& store = graphrag::GraphStore::instance();
     graphrag::QueryEngine qe(store);
     json data = qe.get_security_analysis(hash, limit);
     return tool_result_t::ok(std::string("Security overview: ") +
@@ -12266,7 +12443,19 @@ std::string reg_name_from_num(int reg)
 int reg_num_from_json(const json& v)
 {
     if (v.is_number_integer())
-        return v.get<int>();
+    {
+        const std::int64_t value = v.get<std::int64_t>();
+        if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+            return static_cast<int>(value);
+        return -1;
+    }
+    if (v.is_number_unsigned())
+    {
+        const std::uint64_t value = v.get<std::uint64_t>();
+        if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+            return static_cast<int>(value);
+        return -1;
+    }
     if (!v.is_string())
         return -1;
 
@@ -13088,11 +13277,9 @@ namespace
         if (params.is_object()) {
             if (params.contains("require_unsanitized") && params["require_unsanitized"].is_boolean())
                 require_unsanitized = params["require_unsanitized"].get<bool>();
-            if (params.contains("max_paths") && params["max_paths"].is_number_integer())
-                max_paths = params["max_paths"].get<int>();
-            if (params.contains("max_depth") && params["max_depth"].is_number_integer())
-                max_depth = params["max_depth"].get<int>();
-        }
+            max_paths = safe_json_int_param(params, "max_paths", max_paths);
+max_depth = safe_json_int_param(params, "max_depth", max_depth);
+}
         auto only_kind = parse_kind_opt(params, "only_kind");
         std::vector<taint_path_t> paths;
         {
@@ -13117,11 +13304,9 @@ namespace
         if (params.is_object()) {
             if (params.contains("sink") && params["sink"].is_string())
                 sink_spec = params["sink"].get<std::string>();
-            if (params.contains("max_paths") && params["max_paths"].is_number_integer())
-                max_paths = params["max_paths"].get<int>();
-            if (params.contains("max_depth") && params["max_depth"].is_number_integer())
-                max_depth = params["max_depth"].get<int>();
-        }
+            max_paths = safe_json_int_param(params, "max_paths", max_paths);
+max_depth = safe_json_int_param(params, "max_depth", max_depth);
+}
         if (sink_spec.empty())
             return tool_result_t::error(std::string("sink required"), std::string("bad_param"));
         ea_t sink_ea = parse_ea_or_name(sink_spec);
@@ -13212,9 +13397,8 @@ namespace
     tool_result_t handle_rank_hot_functions(const json& params)
     {
         int limit = 64;
-        if (params.is_object() && params.contains("limit") && params["limit"].is_number_integer())
-            limit = params["limit"].get<int>();
-        if (limit <= 0) limit = 64;
+        limit = safe_json_int_param(params, "limit", limit);
+if (limit <= 0) limit = 64;
         if (limit > 1024) limit = 1024;
         struct row_t { ea_t ea; std::string name; int score; int hops; std::set<std::string> cats; };
         std::vector<row_t> ranked;
@@ -13276,11 +13460,9 @@ namespace
         if (pfn == nullptr)
             return tool_result_t::error(std::string("not a function"), std::string("no_function_at_addr"));
         int max_paths = 16, max_depth = 10;
-        if (params.contains("max_paths") && params["max_paths"].is_number_integer())
-            max_paths = params["max_paths"].get<int>();
-        if (params.contains("max_depth") && params["max_depth"].is_number_integer())
-            max_depth = params["max_depth"].get<int>();
-        std::vector<taint_path_t> paths;
+        max_paths = safe_json_int_param(params, "max_paths", max_paths);
+max_depth = safe_json_int_param(params, "max_depth", max_depth);
+std::vector<taint_path_t> paths;
         {
             std::lock_guard<std::mutex> lk(engine_mtx());
             paths = aida::vuln::taint::engine().trace_paths_from_source(
@@ -13680,7 +13862,7 @@ namespace
 
         std::vector<int> node_ids;
         if (params.contains("node_ids") && params["node_ids"].is_array())
-            for (auto& v : params["node_ids"]) if (v.is_number_integer()) node_ids.push_back(v.get<int>());
+            for (auto& v : params["node_ids"]) { if (v.is_number_integer()) { const auto __iv = v.get<std::int64_t>(); if (__iv >= std::numeric_limits<int>::min() && __iv <= std::numeric_limits<int>::max()) node_ids.push_back(static_cast<int>(__iv)); } else if (v.is_number_unsigned()) { const auto __uv = v.get<std::uint64_t>(); if (__uv <= static_cast<std::uint64_t>(std::numeric_limits<int>::max())) node_ids.push_back(static_cast<int>(__uv)); } }
 
         std::vector<ea_t> addrs;
         if (params.contains("addresses"))
@@ -13768,10 +13950,8 @@ namespace
             graphrag::decode_cursor(params["cursor"].get<std::string>(), in_cursor);
 
         int limit = 50;
-        if (params.contains("limit") && params["limit"].is_number_integer())
-            limit = params["limit"].get<int>();
-
-        auto& store = graphrag::GraphStore::instance();
+        limit = safe_json_int_param(params, "limit", limit);
+auto& store = graphrag::GraphStore::instance();
         graphrag::QueryEngine qe(store);
         graphrag::query_cursor_t out_cursor;
         bool has_more = false;
@@ -13797,11 +13977,9 @@ namespace
         int max_paths = 64, max_depth = 10;
         if (params.is_object())
         {
-            if (params.contains("max_paths") && params["max_paths"].is_number_integer())
-                max_paths = params["max_paths"].get<int>();
-            if (params.contains("max_depth") && params["max_depth"].is_number_integer())
-                max_depth = params["max_depth"].get<int>();
-        }
+            max_paths = safe_json_int_param(params, "max_paths", max_paths);
+max_depth = safe_json_int_param(params, "max_depth", max_depth);
+}
 
         std::vector<aida::vuln::taint::taint_path_t> paths;
         try {
@@ -14093,7 +14271,7 @@ namespace
             if (pfn) get_func_name(&fn, pfn->start_ea);
             cs["func_name"] = std::string(fn.c_str());
             e["callsites"].push_back(std::move(cs));
-            e["callsite_count"] = e["callsite_count"].get<int>() + 1;
+            e["callsite_count"] = safe_json_int_value(e["callsite_count"], 0) + 1;
         }
         return 1;
     }

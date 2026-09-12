@@ -587,17 +587,32 @@ tool_result_t tool_start_audit(const json& p)
     }
     if (p.contains("scope_only") && p["scope_only"].is_boolean()) cfg.scope_only = p["scope_only"].get<bool>();
     if (p.contains("follow_redirects") && p["follow_redirects"].is_boolean()) cfg.follow_redirects = p["follow_redirects"].get<bool>();
-    if (p.contains("timeout_ms") && p["timeout_ms"].is_number_integer()) cfg.timeout_ms = p["timeout_ms"].get<int>();
-    if (p.contains("max_concurrent") && p["max_concurrent"].is_number_unsigned()) {
-        cfg.max_concurrent_requests = p["max_concurrent"].get<size_t>();
+    if (p.contains("timeout_ms")) {
+        if (!p["timeout_ms"].is_number_integer()) return scanner_param_error("timeout_ms must be an integer", "timeout_ms");
+        const auto value = p["timeout_ms"].get<long long>();
+        if (value < 1 || value > 120000) return scanner_param_error("timeout_ms must be in 1..120000", "timeout_ms");
+        cfg.timeout_ms = static_cast<int>(value);
+    }
+    if (p.contains("max_concurrent")) {
+        if (!p["max_concurrent"].is_number_integer()) return scanner_param_error("max_concurrent must be an integer", "max_concurrent");
+        const auto value = p["max_concurrent"].get<long long>();
+        if (value < 1 || value > 64) return scanner_param_error("max_concurrent must be in 1..64", "max_concurrent");
+        cfg.max_concurrent_requests = static_cast<size_t>(value);
         cfg.max_concurrent_explicit = true;
     }
-    if (p.contains("throttle_ms") && p["throttle_ms"].is_number_unsigned()) {
-        cfg.request_throttle_ms = p["throttle_ms"].get<size_t>();
+    if (p.contains("throttle_ms")) {
+        if (!p["throttle_ms"].is_number_integer()) return scanner_param_error("throttle_ms must be an integer", "throttle_ms");
+        const auto value = p["throttle_ms"].get<long long>();
+        if (value < 0 || value > 60000) return scanner_param_error("throttle_ms must be in 0..60000", "throttle_ms");
+        cfg.request_throttle_ms = static_cast<size_t>(value);
         cfg.request_throttle_explicit = true;
     }
-    if (p.contains("per_module_cap") && p["per_module_cap"].is_number_unsigned())
-        cfg.per_module_request_cap = p["per_module_cap"].get<size_t>();
+    if (p.contains("per_module_cap")) {
+        if (!p["per_module_cap"].is_number_integer()) return scanner_param_error("per_module_cap must be an integer", "per_module_cap");
+        const auto value = p["per_module_cap"].get<long long>();
+        if (value < 1 || value > 100000) return scanner_param_error("per_module_cap must be in 1..100000", "per_module_cap");
+        cfg.per_module_request_cap = static_cast<size_t>(value);
+    }
     if (p.contains("session_id")) {
         if (!p["session_id"].is_string())
             return scanner_param_error("session_id must be a string", "session_id");
@@ -890,6 +905,8 @@ tool_result_t tool_cancel(const json& p)
     const bool drained = active_scanner::wait_for_audit_idle(id, 20000);
     diag::log_tagged_fmt("mcp_burp", "tool_cancel ok id=%llu drained=%d", static_cast<unsigned long long>(id), drained ? 1 : 0);
     json data; data["audit_id"] = id; data["cancelled"] = true; data["cancel_requested"] = true; data["drained"] = drained;
+    if (!drained)
+        return tool_result_t::error("audit cancellation timed out before drain", "audit_cancel_timeout", data);
     return tool_result_t::ok(std::string("Cancelled audit ") + std::to_string(id), data);
 }
 
@@ -912,7 +929,12 @@ tool_result_t tool_list_issues(const json& p)
     if (p.contains("audit_id") && p["audit_id"].is_number_unsigned()) {
         f.has_audit_id = true; f.audit_id = p["audit_id"].get<uint64_t>();
     }
-    if (p.contains("limit") && p["limit"].is_number_unsigned()) f.limit = p["limit"].get<size_t>();
+    if (p.contains("limit")) {
+        if (!p["limit"].is_number_integer()) return scanner_param_error("limit must be an integer", "limit");
+        const auto value = p["limit"].get<long long>();
+        if (value < 0 || value > 10000) return scanner_param_error("limit must be in 0..10000", "limit");
+        f.limit = static_cast<size_t>(value);
+    }
     json data = issue_store::export_json(f);
     diag::log_tagged_fmt("mcp_burp", "tool_list_issues ok");
     return tool_result_t::ok(data);

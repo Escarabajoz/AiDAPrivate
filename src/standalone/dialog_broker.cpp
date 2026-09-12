@@ -80,11 +80,15 @@ std::vector<std::wstring> split_filter(const std::wstring& filter)
 
 bool write_utf8_file(const std::wstring& path, const std::wstring& value)
 {
-    int needed = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1,
+                                     nullptr, 0, nullptr, nullptr);
     if (needed <= 1)
         return false;
-    std::string utf8(static_cast<size_t>(needed - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, utf8.data(), needed, nullptr, nullptr);
+    std::string utf8(static_cast<size_t>(needed), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.c_str(), -1, utf8.data(),
+                            needed, nullptr, nullptr) != needed)
+        return false;
+    utf8.resize(static_cast<size_t>(needed - 1));
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
         FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED, nullptr);
     if (h == INVALID_HANDLE_VALUE)

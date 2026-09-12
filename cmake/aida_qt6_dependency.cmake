@@ -10,7 +10,7 @@ if(NOT EXISTS "${Qt6_DIR}/Qt6Config.cmake")
         "plans/qt6_migration/16_tests_build_assets.md section 7.1.")
 endif()
 
-find_package(Qt6 6.8.3 REQUIRED COMPONENTS Core Gui Widgets Network Svg Test)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Gui Widgets Network Svg Test)
 
 # Qt6::Test injects QT_TESTCASE_BUILDDIR/QT_TESTCASE_SOURCEDIR with a trailing
 # path separator; on MSVC the resulting \" before the closing quote escapes it and

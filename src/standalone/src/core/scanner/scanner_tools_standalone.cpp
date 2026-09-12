@@ -111,6 +111,28 @@ static bool parse_u64_param(const json& params, const char* key, uint64_t& out) 
 	return false;
 }
 
+static bool parse_bounded_u64_param(const json& params, const char* key, uint64_t min_value,
+	uint64_t max_value, uint64_t& out) {
+	if (!params.contains(key))
+		return false;
+	const auto& value = params[key];
+	uint64_t parsed = 0;
+	if (value.is_number_unsigned()) {
+		parsed = value.get<uint64_t>();
+	} else if (value.is_number_integer()) {
+		const int64_t signed_value = value.get<int64_t>();
+		if (signed_value < 0)
+			return false;
+		parsed = static_cast<uint64_t>(signed_value);
+	} else {
+		return false;
+	}
+	if (parsed < min_value || parsed > max_value)
+		return false;
+	out = parsed;
+	return true;
+}
+
 static int clamp_wait_ms(const json& params, int default_ms) {
 	int wait_ms = default_ms;
 	if (params.contains("wait_ms") && params["wait_ms"].is_number_integer())
@@ -2396,7 +2418,7 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 		 {std::string("range_size"), std::string("number"), std::string("Optional pointer-slot scan range size in bytes"), false},
 		 {std::string("timeout_ms"), std::string("number"), std::string("Maximum wait time, capped at 30000 ms"), false},
 		 {std::string("allow_partial"), std::string("boolean"), std::string("Return partial results without marking the payload as timed out"), false}},
-		handle_pointer_scan, true});
+		handle_pointer_scan, false});
 
 	register_compat(srv, {std::string("scanner_cancel_pointer_scan"), std::string("memory_scanner"),
 		std::string("Cancel a running pointer scan."),
@@ -2426,6 +2448,8 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 			result["pointer_scanning_after"] = memory_scanner::g_state.pointer_scanning.load();
 			result["active_pointer_session"] = g_active_pointer_session.load(std::memory_order_relaxed);
 			result["before_state"] = std::move(before_state);
+			if (!stopped)
+				return tool_result_t::error(std::string("Pointer scan cancellation timed out."), result);
 			return tool_result_t::ok(std::string("Pointer scan cancelled."), result);
 		}, false});
 
@@ -2436,6 +2460,12 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 				return tool_result_t::error(std::string("'base_address' is required."));
 			auto addr = sa_parse_address(params["base_address"].get<std::string>());
 			if (!addr) return tool_result_t::error(std::string("Invalid base_address."));
+			uint64_t packing = 0;
+			if (params.contains("packing") && !parse_bounded_u64_param(params, "packing", 0, UINT16_MAX, packing))
+				return tool_result_t::error(std::string("Invalid structure packing."));
+			uint64_t alignment = 0;
+			if (params.contains("alignment") && !parse_bounded_u64_param(params, "alignment", 0, UINT16_MAX, alignment))
+				return tool_result_t::error(std::string("Invalid structure alignment."));
 			int idx = struct_dissector::create_struct(params["name"].get<std::string>());
 			if (idx < 0)
 				return tool_result_t::error(std::string("Failed to create struct."));
@@ -2446,13 +2476,13 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 				return tool_result_t::error(std::string("Failed to configure union layout."));
 			}
 			if (params.contains("packing") && !struct_dissector::set_structure_packing(idx,
-				params["packing"].get<std::uint16_t>())) {
+				static_cast<std::uint16_t>(packing))) {
 				std::string rollback_error;
 				struct_dissector::remove_structure(idx, rollback_error);
 				return tool_result_t::error(std::string("Invalid structure packing."));
 			}
 			if (params.contains("alignment") && !struct_dissector::set_structure_alignment(idx,
-				params["alignment"].get<std::uint16_t>())) {
+				static_cast<std::uint16_t>(alignment))) {
 				std::string rollback_error;
 				struct_dissector::remove_structure(idx, rollback_error);
 				return tool_result_t::error(std::string("Invalid structure alignment."));
@@ -2479,7 +2509,25 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 				return tool_result_t::error(std::string("'offset' is required."));
 			if (!params.contains("field_type") || !params["field_type"].is_string())
 				return tool_result_t::error(std::string("'field_type' is required."));
-			int si = params["struct_index"].get<int>();
+			uint64_t struct_index = 0;
+			uint64_t offset = 0;
+			if (!parse_bounded_u64_param(params, "struct_index", 0, INT_MAX, struct_index))
+				return tool_result_t::error(std::string("Invalid struct_index."));
+			if (!parse_bounded_u64_param(params, "offset", 0, UINT32_MAX, offset))
+				return tool_result_t::error(std::string("Invalid offset."));
+			uint64_t array_count = 1;
+			if (params.contains("array_count") && !parse_bounded_u64_param(params, "array_count", 1, UINT32_MAX, array_count))
+				return tool_result_t::error(std::string("Invalid array_count."));
+			uint64_t bit_offset = 0;
+			if (params.contains("bit_offset") && !parse_bounded_u64_param(params, "bit_offset", 0, UINT16_MAX, bit_offset))
+				return tool_result_t::error(std::string("Invalid bit_offset."));
+			uint64_t bit_width = 0;
+			if (params.contains("bit_width") && !parse_bounded_u64_param(params, "bit_width", 0, UINT16_MAX, bit_width))
+				return tool_result_t::error(std::string("Invalid bit_width."));
+			uint64_t alignment = 0;
+			if (params.contains("alignment") && !parse_bounded_u64_param(params, "alignment", 0, UINT16_MAX, alignment))
+				return tool_result_t::error(std::string("Invalid field alignment."));
+			int si = static_cast<int>(struct_index);
 			std::string type_str = params["field_type"].get<std::string>();
 			struct_dissector::field_type_t ft = struct_dissector::field_type_t::int32;
 			if (type_str == "int8") ft = struct_dissector::field_type_t::int8;
@@ -2499,6 +2547,9 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 			else if (type_str == "padding") ft = struct_dissector::field_type_t::padding;
 			else if (type_str == "nested_struct") ft = struct_dissector::field_type_t::nested_struct;
 			else return tool_result_t::error(std::string("Unknown field_type: ") + type_str);
+			uint64_t size = static_cast<uint64_t>((std::max)(std::size_t{1}, struct_dissector::field_type_size(ft)));
+			if (params.contains("size") && !parse_bounded_u64_param(params, "size", 1, UINT32_MAX, size))
+				return tool_result_t::error(std::string("Invalid field size."));
 			if (ft == struct_dissector::field_type_t::nested_struct &&
 				(!params.contains("target_structure") || !params["target_structure"].is_string()))
 				return tool_result_t::error(std::string("nested_struct requires 'target_structure'."));
@@ -2506,12 +2557,12 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 			fld.name = params["name"].get<std::string>();
 			fld.type = ft == struct_dissector::field_type_t::nested_struct
 				? struct_dissector::field_type_t::byte_array : ft;
-			fld.offset = static_cast<uint32_t>(params["offset"].get<int>());
-			fld.size = params.value("size", static_cast<uint32_t>((std::max)(std::size_t{1}, struct_dissector::field_type_size(ft))));
-			fld.array_count = params.value("array_count", 1u);
-			fld.bit_offset = params.value("bit_offset", std::uint16_t{0});
-			fld.bit_width = params.value("bit_width", std::uint16_t{0});
-			fld.explicit_alignment = params.value("alignment", std::uint16_t{0});
+			fld.offset = static_cast<uint32_t>(offset);
+			fld.size = static_cast<uint32_t>(size);
+			fld.array_count = static_cast<uint32_t>(array_count);
+			fld.bit_offset = static_cast<uint16_t>(bit_offset);
+			fld.bit_width = static_cast<uint16_t>(bit_width);
+			fld.explicit_alignment = static_cast<uint16_t>(alignment);
 			fld.description = params.value("description", std::string{});
 			int fi = struct_dissector::add_field(si, fld);
 			if (fi < 0)
@@ -2534,7 +2585,10 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 	auto scanner_get_struct = [](const json& params) -> tool_result_t {
 			if (!params.contains("struct_index") || !params["struct_index"].is_number())
 				return tool_result_t::error(std::string("'struct_index' is required."));
-			int si = params["struct_index"].get<int>();
+			uint64_t struct_index = 0;
+			if (!parse_bounded_u64_param(params, "struct_index", 0, INT_MAX, struct_index))
+				return tool_result_t::error(std::string("Invalid struct_index."));
+			int si = static_cast<int>(struct_index);
 			{
 				std::lock_guard<std::mutex> lk(struct_dissector::g_state.mtx);
 				if (si < 0 || si >= static_cast<int>(struct_dissector::g_state.structs.size()))
@@ -2583,7 +2637,10 @@ void register_scanner_tools(mcp_standalone::server_t& srv) {
 	auto scanner_export_struct_c = [](const json& params) -> tool_result_t {
 			if (!params.contains("struct_index") || !params["struct_index"].is_number())
 				return tool_result_t::error(std::string("'struct_index' is required."));
-			int si = params["struct_index"].get<int>();
+			uint64_t struct_index = 0;
+			if (!parse_bounded_u64_param(params, "struct_index", 0, INT_MAX, struct_index))
+				return tool_result_t::error(std::string("Invalid struct_index."));
+			int si = static_cast<int>(struct_index);
 			std::string code = struct_dissector::export_to_c(si);
 			if (code.empty())
 				return tool_result_t::error(std::string("Invalid struct_index or empty struct."));

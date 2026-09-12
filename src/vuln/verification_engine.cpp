@@ -1456,9 +1456,9 @@ nlohmann::json VerificationEngine::persist_ledger(const std::string& action)
             void* blob = nn.getblob(nullptr, &sz, k_verify_ledger_blob_start + page, k_verify_ledger_blob_tag);
             if (blob == nullptr)
                 break;
-            const std::uint8_t* bytes = static_cast<const std::uint8_t*>(blob);
+            const std::unique_ptr<void, decltype(&qfree)> blob_guard(blob, &qfree);
+            const std::uint8_t* bytes = static_cast<const std::uint8_t*>(blob_guard.get());
             packed.insert(packed.end(), bytes, bytes + sz);
-            qfree(blob);
         }
         result["ledger_size_bytes"] = packed.size();
         if (packed.empty())

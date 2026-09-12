@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -107,6 +108,8 @@ namespace sa_settings_detail
         if (plaintext.empty())
             return plaintext;
 
+        if (plaintext.size() > static_cast<size_t>(MAXDWORD)) return {};
+        if (std::strlen(scope) > static_cast<size_t>(MAXDWORD)) return {};
         DATA_BLOB input_blob{
             static_cast<DWORD>(plaintext.size()),
             reinterpret_cast<BYTE*>(const_cast<char*>(plaintext.data()))
@@ -139,6 +142,7 @@ namespace sa_settings_detail
         std::vector<unsigned char> bytes;
         if (!hex_decode(encoded.substr(std::strlen(CFG_DPAPI_PREFIX)), bytes))
             return {};
+        if (bytes.size() > static_cast<size_t>(MAXDWORD)) return {};
 
         DATA_BLOB input_blob{static_cast<DWORD>(bytes.size()), bytes.data()};
         DATA_BLOB entropy_blob{
@@ -296,6 +300,9 @@ namespace sa_settings_detail
 
     inline bool read_json_file(const std::filesystem::path& path, nlohmann::json& out)
     {
+        std::error_code ec;
+        auto sz = std::filesystem::file_size(path, ec);
+        if (!ec && sz > 16 * 1024 * 1024) return false;
         std::ifstream ifs(path);
         if (!ifs.is_open())
             return false;
@@ -1337,12 +1344,28 @@ struct settings_sa_t
                 dst = sa_settings_detail::deobfuscate_key(sa_settings_detail::trim(root[key].get<std::string>()));
         };
         auto integer = [&](const char* key, int& dst) {
-            if (root.contains(key) && root[key].is_number_integer())
-                dst = root[key].get<int>();
+            if (!root.contains(key)) return;
+            const auto& v = root[key];
+            if (!v.is_number_integer() && !v.is_number_unsigned()) return;
+            try {
+                long long vv = v.get<long long>();
+                if (vv < INT_MIN || vv > INT_MAX) return;
+                dst = static_cast<int>(vv);
+            } catch (...) {}
         };
         auto i64 = [&](const char* key, int64_t& dst) {
-            if (root.contains(key) && root[key].is_number_integer())
-                dst = root[key].get<int64_t>();
+            if (!root.contains(key)) return;
+            const auto& v = root[key];
+            if (!v.is_number_integer() && !v.is_number_unsigned()) return;
+            try {
+                if (v.is_number_unsigned()) {
+                    unsigned long long uv = v.get<unsigned long long>();
+                    if (uv > static_cast<unsigned long long>(LLONG_MAX)) return;
+                    dst = static_cast<int64_t>(uv);
+                } else {
+                    dst = v.get<int64_t>();
+                }
+            } catch (...) {}
         };
         auto boolean = [&](const char* key, bool& dst) {
             if (root.contains(key) && root[key].is_boolean())
@@ -1375,8 +1398,12 @@ struct settings_sa_t
         str("symbol_cache_dir", symbol_cache_dir);
         boolean("symbol_auto_download", symbol_auto_download);
         str("symbol_server_url", symbol_server_url);
-        if (root.contains("temperature") && root["temperature"].is_number())
-            temperature = root["temperature"].get<double>();
+        if (root.contains("temperature") && root["temperature"].is_number()) {
+            try {
+                double vv = root["temperature"].get<double>();
+                if (std::isfinite(vv)) temperature = vv;
+            } catch (...) {}
+        }
         integer("mcp_port", mcp_port);
         boolean("mcp_enabled", mcp_enabled);
 
@@ -1397,10 +1424,18 @@ struct settings_sa_t
         str("debugger_definitions_json", debugger_definitions_json);
 		str("memory_scanner_state_json", memory_scanner_state_json);
         ui_density = ui_density == 1 ? 1 : 0;
-        if (root.contains("editor_font_size") && root["editor_font_size"].is_number())
-            editor_font_size = root["editor_font_size"].get<float>();
-        if (root.contains("chat_font_size") && root["chat_font_size"].is_number())
-            chat_font_size = root["chat_font_size"].get<float>();
+        if (root.contains("editor_font_size") && root["editor_font_size"].is_number()) {
+            try {
+                double vv = root["editor_font_size"].get<double>();
+                if (std::isfinite(vv) && vv >= -1e6 && vv <= 1e6) editor_font_size = static_cast<float>(vv);
+            } catch (...) {}
+        }
+        if (root.contains("chat_font_size") && root["chat_font_size"].is_number()) {
+            try {
+                double vv = root["chat_font_size"].get<double>();
+                if (std::isfinite(vv) && vv >= -1e6 && vv <= 1e6) chat_font_size = static_cast<float>(vv);
+            } catch (...) {}
+        }
 
         boolean("enable_reasoning", enable_reasoning);
         integer("reasoning_budget", reasoning_budget);
@@ -1443,14 +1478,26 @@ struct settings_sa_t
         boolean("auto_approve_mode_switch", auto_approve_mode_switch);
         boolean("auto_approve_subtask", auto_approve_subtask);
         integer("auto_approve_max_requests", auto_approve_max_requests);
-        if (root.contains("auto_approve_max_cost") && root["auto_approve_max_cost"].is_number())
-            auto_approve_max_cost = root["auto_approve_max_cost"].get<double>();
+        if (root.contains("auto_approve_max_cost") && root["auto_approve_max_cost"].is_number()) {
+            try {
+                double vv = root["auto_approve_max_cost"].get<double>();
+                if (std::isfinite(vv)) auto_approve_max_cost = vv;
+            } catch (...) {}
+        }
         str("auto_approve_allowed_commands", auto_approve_allowed_commands);
         str("aidaignore_path", aidaignore_path);
-        if (root.contains("condense_threshold") && root["condense_threshold"].is_number())
-            condense_threshold = root["condense_threshold"].get<double>();
-        if (root.contains("condense_buffer") && root["condense_buffer"].is_number())
-            condense_buffer = root["condense_buffer"].get<double>();
+        if (root.contains("condense_threshold") && root["condense_threshold"].is_number()) {
+            try {
+                double vv = root["condense_threshold"].get<double>();
+                if (std::isfinite(vv)) condense_threshold = vv;
+            } catch (...) {}
+        }
+        if (root.contains("condense_buffer") && root["condense_buffer"].is_number()) {
+            try {
+                double vv = root["condense_buffer"].get<double>();
+                if (std::isfinite(vv)) condense_buffer = vv;
+            } catch (...) {}
+        }
         str("recent_workspaces_json", recent_workspaces_json);
         boolean("activity_bar_visible", activity_bar_visible);
 
@@ -1466,9 +1513,14 @@ struct settings_sa_t
             return fallback;
         };
         auto json_get_int = [](const nlohmann::json& obj, const char* key, int fallback) -> int {
-            if (obj.contains(key) && obj[key].is_number_integer())
-                return obj[key].get<int>();
-            return fallback;
+            if (!obj.contains(key)) return fallback;
+            const auto& v = obj[key];
+            if (!v.is_number_integer() && !v.is_number_unsigned()) return fallback;
+            try {
+                long long vv = v.get<long long>();
+                if (vv < INT_MIN || vv > INT_MAX) return fallback;
+                return static_cast<int>(vv);
+            } catch (...) { return fallback; }
         };
         auto json_get_bool = [](const nlohmann::json& obj, const char* key, bool fallback) -> bool {
             if (obj.contains(key) && obj[key].is_boolean())
@@ -1477,6 +1529,7 @@ struct settings_sa_t
         };
 
         if (root.contains("provider_profiles") && root["provider_profiles"].is_array()) {
+            if (root["provider_profiles"].size() > 1024) return true;
             provider_profiles.clear();
             size_t index = 0;
             for (const auto& item : root["provider_profiles"]) {

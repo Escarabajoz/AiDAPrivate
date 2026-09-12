@@ -28,6 +28,7 @@
 #include <atomic>
 #include <array>
 #include <chrono>
+#include <memory>
 #include <cctype>
 #include <cstdio>
 #include <cstdint>
@@ -168,12 +169,17 @@ static bool is_process_alive(std::uint32_t pid)
 {
     if (pid == 0)
         return false;
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!h)
+    struct process_handle_closer_t {
+        void operator()(void* value) const noexcept {
+            if (value) ::CloseHandle(static_cast<HANDLE>(value));
+        }
+    };
+    using unique_process_handle_t = std::unique_ptr<void, process_handle_closer_t>;
+    unique_process_handle_t process(OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid));
+    if (!process)
         return false;
     DWORD exit_code = 0;
-    const bool ok = GetExitCodeProcess(h, &exit_code) != FALSE;
-    CloseHandle(h);
+    const bool ok = GetExitCodeProcess(static_cast<HANDLE>(process.get()), &exit_code) != FALSE;
     return ok && exit_code == STILL_ACTIVE;
 }
 

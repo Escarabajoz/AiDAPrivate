@@ -14,6 +14,31 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $BuildDir = Join-Path $Root "build-ninja"
+
+$provisionScript = Join-Path $Root "provision-deps.ps1"
+$needProvision = $false
+$requiredProbe = Join-Path $Root ".deps/zydis-4.1.1/CMakeLists.txt"
+if (-not (Test-Path -LiteralPath $requiredProbe)) { $needProvision = $true }
+$opensslProbe = "C:\Program Files\OpenSSL-Win64\include\openssl\ssl.h"
+if (-not (Test-Path -LiteralPath $opensslProbe)) {
+    $localOpenssl = Join-Path $Root ".openssl_local/include/openssl/ssl.h"
+    if (-not (Test-Path -LiteralPath $localOpenssl)) { $needProvision = $true }
+    if (-not $env:OPENSSL_ROOT_DIR -and (Test-Path -LiteralPath $localOpenssl)) {
+        $env:OPENSSL_ROOT_DIR = Join-Path $Root ".openssl_local"
+        Write-Host "[build-host] using local OpenSSL stub at $env:OPENSSL_ROOT_DIR"
+    }
+}
+if ($needProvision -and (Test-Path -LiteralPath $provisionScript)) {
+    Write-Host "[build-host] provision-deps: missing .deps or OpenSSL, running $provisionScript"
+    try { & $provisionScript } catch { Write-Host "[build-host] provision-deps failed: $($_.Exception.Message)" -ForegroundColor Yellow }
+    if (-not $env:OPENSSL_ROOT_DIR) {
+        $localOpenssl2 = Join-Path $Root ".openssl_local/include/openssl/ssl.h"
+        if (Test-Path -LiteralPath $localOpenssl2) {
+            $env:OPENSSL_ROOT_DIR = Join-Path $Root ".openssl_local"
+            Write-Host "[build-host] using local OpenSSL stub at $env:OPENSSL_ROOT_DIR"
+        }
+    }
+}
 $RunId = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogDir = Join-Path $env:TEMP "aida-build-$RunId"
 $SummaryPath = Join-Path $LogDir "summary.json"
@@ -256,8 +281,11 @@ if ($Drivers) {
 
 $steps.Add((New-Step "build" "cmake --build --preset $Preset$BuildParallelArg" "build.log" (Join-Path $env:TEMP "aida_build_out.txt")))
 
-if (-not $SkipVerify) {
+$shouldVerify = (-not $SkipVerify) -and ($Configure -or $CleanBuildTree -or $Drivers -or $env:AIDA_FORCE_VERIFY -eq "1")
+if ($shouldVerify) {
     $steps.Add((New-Step "verify" "cmake --build --preset $Preset$BuildParallelArg" "verify.log" (Join-Path $env:TEMP "aida_build_verify_out.txt")))
+} elseif (-not $SkipVerify) {
+    Write-Host "[build-host] verify skipped (incremental build -- use -SkipVerify:$false -or AIDA_FORCE_VERIFY=1 to force)"
 }
 
 if ($PlanOnly) {

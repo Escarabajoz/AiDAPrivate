@@ -16,6 +16,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -306,6 +307,8 @@ namespace {
 		const auto path = cache_path();
 		std::error_code ec;
 		std::filesystem::create_directories(path.parent_path(), ec);
+		if (ec)
+			return false;
 		std::ofstream ofs(path, std::ios::binary | std::ios::trunc);
 		if (!ofs.is_open())
 			return false;
@@ -354,7 +357,12 @@ namespace {
 	{
 		const double cost_sum = m.cost.input_per_million + m.cost.output_per_million;
 		const double ctx = m.limit.context > 0 ? static_cast<double>(m.limit.context) : 1.0;
-		return static_cast<int64_t>(ctx * (cost_sum + 1.0));
+		const double score = ctx * (cost_sum + 1.0);
+		if (!std::isfinite(score) || score >= static_cast<double>((std::numeric_limits<int64_t>::max)()))
+			return (std::numeric_limits<int64_t>::max)();
+		if (score <= static_cast<double>((std::numeric_limits<int64_t>::min)()))
+			return (std::numeric_limits<int64_t>::min)();
+		return static_cast<int64_t>(score);
 	}
 
 }

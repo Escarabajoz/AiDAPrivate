@@ -139,11 +139,23 @@ void verify_registry_guards()
                 })),
             "bounded registry tool did not register");
     require(!registry.register_tool(independent_tool(
-                "bounded", [](const json&) {
-                    return mcp_standalone::tool_result_t::ok(
-                        json{{"ok", true}});
-                })),
-            "production registry accepted a duplicate tool");
+                 "bounded", [](const json&) {
+                     return mcp_standalone::tool_result_t::ok(
+                         json{{"ok", true}});
+                 })),
+             "production registry accepted a duplicate tool");
+    require(registry.register_tool(independent_tool(
+                 "decompile_function", [](const json&) {
+                     return mcp_standalone::tool_result_t::ok(
+                         json{{"ok", true}});
+                 })),
+             "decompile duplicate fixture did not register");
+    require(!registry.register_tool(independent_tool(
+                 "decompile_function", [](const json&) {
+                     return mcp_standalone::tool_result_t::ok(
+                         json{{"ok", true}});
+                 })),
+             "production registry replaced a duplicate decompile tool");
 
     auto malformed_output = independent_tool(
         "malformed_output", [](const json&) {

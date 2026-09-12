@@ -1,5 +1,6 @@
 #include "chain_schema.hpp"
 
+#include <limits>
 #include <unordered_set>
 #include <utility>
 
@@ -63,7 +64,13 @@ bool read_int_field(const nlohmann::json& value,
         errors.add("invalid_type", path + "/" + key, "expected integer");
         return false;
     }
-    out = it->get<int>();
+    const auto integer = it->get<nlohmann::json::number_integer_t>();
+    if (integer < (std::numeric_limits<int>::min)() || integer > (std::numeric_limits<int>::max)())
+    {
+        errors.add("invalid_range", path + "/" + key, "integer is outside the supported range");
+        return false;
+    }
+    out = static_cast<int>(integer);
     return true;
 }
 

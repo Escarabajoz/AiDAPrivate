@@ -2552,21 +2552,22 @@ bool spawn_and_attach_target(const run_target::launch_options_t& opts,
 
 	HANDLE p_handle = reinterpret_cast<HANDLE>(lr.process_handle);
 	HANDLE t_handle = reinterpret_cast<HANDLE>(lr.thread_handle);
+	struct handle_guard_t {
+		HANDLE handle = nullptr;
+		~handle_guard_t() noexcept { if (handle) ::CloseHandle(handle); }
+		void release() noexcept { handle = nullptr; }
+	} p_guard{p_handle}, t_guard{t_handle};
 	if (out_result) {
 		*out_result = lr;
+		p_guard.release();
+		t_guard.release();
 		lr.process_handle = 0;
 		lr.thread_handle = 0;
 		lr.job_handle = 0;
 		lr.firewall_rule_name.clear();
 	} else {
-		if (t_handle) {
-			CloseHandle(t_handle);
-			lr.thread_handle = 0;
-		}
-		if (p_handle) {
-			CloseHandle(p_handle);
-			lr.process_handle = 0;
-		}
+		lr.thread_handle = 0;
+		lr.process_handle = 0;
 		if (lr.job_handle != 0) {
 			diag::log_tagged_critical_fmt("spawn",
 				"spawn_owns_job job=%p kill_on_host_exit=%d (handle kept open intentionally)",

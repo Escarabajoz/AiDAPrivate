@@ -14,19 +14,23 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 find_program(AIDA_SCCACHE_PROGRAM sccache
-    HINTS "${CMAKE_SOURCE_DIR}/sccache-v0.15.0-x86_64-pc-windows-msvc")
-if(AIDA_SCCACHE_PROGRAM AND NOT DEFINED ENV{SCCACHE_DISABLE})
-    message(STATUS "AiDA: sccache enabled for C++ at ${AIDA_SCCACHE_PROGRAM}")
-    set(CMAKE_C_COMPILER_LAUNCHER   "" CACHE STRING "compiler launcher (disabled for C)" FORCE)
-    set(CMAKE_CXX_COMPILER_LAUNCHER "${AIDA_SCCACHE_PROGRAM}" CACHE STRING "compiler launcher (sccache)" FORCE)
+    HINTS "${CMAKE_SOURCE_DIR}/sccache-v0.15.0-x86_64-pc-windows-msvc"
+          "${CMAKE_SOURCE_DIR}/.sccache"
+          "$ENV{SCCACHE_DIR}/..")
+if(AIDA_SCCACHE_PROGRAM)
+    if(DEFINED ENV{SCCACHE_DISABLE} AND "$ENV{SCCACHE_DISABLE}" STREQUAL "1")
+        message(STATUS "AiDA: sccache found at ${AIDA_SCCACHE_PROGRAM} but SCCACHE_DISABLE=1 -- caching disabled")
+    else()
+        message(STATUS "AiDA: sccache enabled for C/C++ at ${AIDA_SCCACHE_PROGRAM} (SCCACHE_DIR=$ENV{SCCACHE_DIR})")
+        set(CMAKE_C_COMPILER_LAUNCHER   "${AIDA_SCCACHE_PROGRAM}" CACHE STRING "compiler launcher (sccache)" FORCE)
+        set(CMAKE_CXX_COMPILER_LAUNCHER "${AIDA_SCCACHE_PROGRAM}" CACHE STRING "compiler launcher (sccache)" FORCE)
+    endif()
 endif()
 
 if(MSVC)
     set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "$<$<CONFIG:Debug,RelWithDebInfo,Release>:Embedded>")
 
     if(CMAKE_GENERATOR MATCHES "Ninja")
-        set(_aida_rule_launch_compile "\"${CMAKE_COMMAND}\" -E chdir \"${CMAKE_BINARY_DIR}\"")
-        set_property(GLOBAL PROPERTY RULE_LAUNCH_COMPILE "${_aida_rule_launch_compile}")
         cmake_host_system_information(RESULT _aida_logical_cpus QUERY NUMBER_OF_LOGICAL_CORES)
         if(NOT _aida_logical_cpus OR _aida_logical_cpus LESS 4)
             set(_aida_logical_cpus 8)
@@ -69,6 +73,19 @@ option(AIDA_ENABLE_LTCG "Enable /GL + /LTCG on AiDA.dll (slower link, marginally
 option(AIDA_FAST_LINK   "Use /DEBUG (default) instead of /DEBUG:FULL for faster linking" ON)
 option(AIDA_HARDEN_RELEASE "Enable MSVC compiler/linker hardening (/GS /guard:cf /guard:ehcont /guard:xfg /Qspectre /sdl /CETCOMPAT /HIGHENTROPYVA /NXCOMPAT /DYNAMICBASE)" ON)
 option(AIDA_HARDEN_XFG "Enable /guard:xfg (Extended Control Flow Guard, requires Win11 22H2+ runtime)" ON)
+option(AIDA_UNITY_BUILD "Enable unity (jumbo) builds for Qt-heavy TUs -- ~25-35% faster at cost of incremental granularity" OFF)
+if(AIDA_UNITY_BUILD OR (DEFINED ENV{AIDA_UNITY_BUILD} AND "$ENV{AIDA_UNITY_BUILD}" STREQUAL "1"))
+    set(AIDA_UNITY_BUILD_ENABLED ON)
+    if(NOT DEFINED CMAKE_UNITY_BUILD_BATCH_SIZE)
+        set(CMAKE_UNITY_BUILD_BATCH_SIZE 16 CACHE STRING "" FORCE)
+    endif()
+    message(STATUS "AiDA: unity build enabled for AiDAStandalone (batch=${CMAKE_UNITY_BUILD_BATCH_SIZE})")
+else()
+    set(AIDA_UNITY_BUILD_ENABLED OFF)
+endif()
+if(MSVC AND CMAKE_BUILD_TYPE STREQUAL "Release")
+    add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:/cgthreads8>)
+endif()
 set(AIDA_BENCHMARK_REAL_PE "" CACHE FILEPATH
     "300-500MB PE fixture that enables the aida_c03_benchmark_real_harness ctest target (mirrors Test Lab AIDA_BENCHMARK_REAL_PE)")
 
@@ -346,6 +363,7 @@ set(AIDA_CONCURRENTQUEUE_LICENSE_FILE
     "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/third_party_notices/concurrentqueue-LICENSE.txt")
 set(parallel_hashmap_SOURCE_DIR "${DEPS_DIR}/parallel-hashmap-2.0.0/parallel-hashmap-2.0.0")
 set(concurrentqueue_SOURCE_DIR "${DEPS_DIR}/concurrentqueue-1.0.5/concurrentqueue-1.0.5")
+option(AIDA_ALLOW_MISSING_DEPS "Allow configure without provisioned .deps for syntax checks" OFF)
 foreach(_aida_required_analysis_dependency IN ITEMS
         "${zydis_SOURCE_DIR}/CMakeLists.txt"
         "${zydis_SOURCE_DIR}/include/Zydis/Zydis.h"
@@ -377,16 +395,29 @@ foreach(_aida_required_analysis_dependency IN ITEMS
         "${AIDA_CONCURRENTQUEUE_LICENSE_FILE}"
         "${AIDA_ANALYSIS_NOTICE_LEDGER_FILE}")
     if(NOT EXISTS "${_aida_required_analysis_dependency}")
-        message(FATAL_ERROR "AiDA: required pinned analysis dependency or notice is missing: ${_aida_required_analysis_dependency}")
+        if(AIDA_ALLOW_MISSING_DEPS)
+            message(WARNING "AiDA: missing deps (allowed): ${_aida_required_analysis_dependency}")
+        else()
+            message(FATAL_ERROR "AiDA: required pinned analysis dependency or notice is missing: ${_aida_required_analysis_dependency}")
+        endif()
     endif()
 endforeach()
+option(AIDA_ALLOW_MISSING_DEPS "Allow configure without provisioned .deps for syntax checks" OFF)
 function(aida_require_analysis_file_sha256 file_path expected_sha256)
     if(NOT EXISTS "${file_path}")
+        if(AIDA_ALLOW_MISSING_DEPS)
+            message(WARNING "AiDA: missing file (allowed): ${file_path}")
+            return()
+        endif()
         message(FATAL_ERROR "AiDA: required pinned analysis file is missing: ${file_path}")
     endif()
 endfunction()
 function(aida_require_analysis_text_sha256 file_path expected_sha256)
     if(NOT EXISTS "${file_path}")
+        if(AIDA_ALLOW_MISSING_DEPS)
+            message(WARNING "AiDA: missing notice (allowed): ${file_path}")
+            return()
+        endif()
         message(FATAL_ERROR "AiDA: required pinned analysis notice is missing: ${file_path}")
     endif()
 endfunction()
@@ -609,8 +640,8 @@ set(LLHTTP_BUILD_SHARED_LIBS OFF CACHE INTERNAL "")
 set(LLHTTP_BUILD_STATIC_LIBS ON CACHE INTERNAL "")
 set(_llhttp_build_shared_libs_saved "${BUILD_SHARED_LIBS}")
 set(_llhttp_build_static_libs_saved "${BUILD_STATIC_LIBS}")
-set(BUILD_SHARED_LIBS OFF)
-set(BUILD_STATIC_LIBS ON)
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS ON CACHE BOOL "" FORCE)
 # The llhttp git repo uses "_RELEASE_" as a version placeholder (substituted by npm during release).
 # Patch it to a real semver string so CMake's project() call doesn't reject it.
 file(READ "${DEPS_DIR}/llhttp/CMakeLists.txt" _llhttp_cmake)
@@ -619,8 +650,8 @@ if("${_llhttp_cmake}" MATCHES "VERSION _RELEASE_")
     file(WRITE "${DEPS_DIR}/llhttp/CMakeLists.txt" "${_llhttp_cmake}")
 endif()
 add_subdirectory("${DEPS_DIR}/llhttp" "${CMAKE_BINARY_DIR}/.deps/llhttp")
-set(BUILD_SHARED_LIBS "${_llhttp_build_shared_libs_saved}")
-set(BUILD_STATIC_LIBS "${_llhttp_build_static_libs_saved}")
+set(BUILD_SHARED_LIBS "${_llhttp_build_shared_libs_saved}" CACHE BOOL "" FORCE)
+set(BUILD_STATIC_LIBS "${_llhttp_build_static_libs_saved}" CACHE BOOL "" FORCE)
 
 set(BUILD_SHARED_LIBS_SAVED_NH2 "${BUILD_SHARED_LIBS}")
 set(BUILD_STATIC_LIBS   ON)
@@ -2227,6 +2258,17 @@ if(WIN32)
             /Zp8
             /bigobj
         )
+        if(AIDA_UNITY_BUILD_ENABLED)
+            set_target_properties(AiDAStandalone PROPERTIES UNITY_BUILD ON UNITY_BUILD_BATCH_SIZE ${CMAKE_UNITY_BUILD_BATCH_SIZE})
+            set_source_files_properties(
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src/core/testlab/test_all_analysis.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src/core/testlab/test_all_scanner.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src/core/testlab/test_all_network.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src/core/testlab/test_all_burp.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src/core/testlab/test_all_debugger.cpp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src/core/testlab/test_all_features.cpp"
+                PROPERTIES SKIP_UNITY_BUILD_INCLUSION ON)
+        endif()
 
         enable_testing()
         aida_c03_register_safe_headless_targets(AiDAStandalone)
@@ -2437,14 +2479,18 @@ if(WIN32)
             add_dependencies(AiDAStandalone ghidra_specs)
         endif()
 
+        file(TO_NATIVE_PATH "${AIDA_DRIVER_OUTPUT_DIR}/WindMapper.exe" _aida_windmapper_src_native)
+        file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/AiDAWindMapper.exe" _aida_windmapper_dst_native)
+        file(TO_NATIVE_PATH "${AIDA_DRIVER_OUTPUT_DIR}/WhosWho.sys" _aida_whoswho_src_native)
+        file(TO_NATIVE_PATH "${CMAKE_BINARY_DIR}/WhosWho.sys" _aida_whoswho_dst_native)
         add_custom_command(TARGET AiDAStandalone POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/build-ninja/Release/WindMapper.exe"
-                "${CMAKE_BINARY_DIR}/AiDAWindMapper.exe"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/build-ninja/Release/WhosWho.sys"
-                "${CMAKE_BINARY_DIR}/WhosWho.sys"
-            COMMENT "Copying WindMapper and WhosWho.sys next to AiDAStandalone")
+            COMMAND cmd /c "if exist \"${_aida_windmapper_src_native}\" \"${CMAKE_COMMAND}\" -E copy_if_different \"${AIDA_DRIVER_OUTPUT_DIR}/WindMapper.exe\" \"${CMAKE_BINARY_DIR}/AiDAWindMapper.exe\" else echo [aida] WindMapper.exe not found at ${_aida_windmapper_src_native} -- skipping staging (build driver with build-host -Drivers)"
+            COMMAND cmd /c "if exist \"${_aida_whoswho_src_native}\" \"${CMAKE_COMMAND}\" -E copy_if_different \"${AIDA_DRIVER_OUTPUT_DIR}/WhosWho.sys\" \"${CMAKE_BINARY_DIR}/WhosWho.sys\" else echo [aida] WhosWho.sys not found at ${_aida_whoswho_src_native} -- skipping staging (build driver with build-host -Drivers)"
+            COMMENT "Staging WindMapper and WhosWho.sys next to AiDAStandalone if present"
+            VERBATIM
+        )
+        set_property(TARGET AiDAStandalone APPEND PROPERTY ADDITIONAL_CLEAN_FILES
+            "${CMAKE_BINARY_DIR}/AiDAWindMapper.exe" "${CMAKE_BINARY_DIR}/WhosWho.sys")
 
         add_executable(AiDAParserProof
             "${STANDALONE_ROOT}/core/testlab/parser_proof_runner.cpp"

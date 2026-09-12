@@ -10,6 +10,7 @@
 #include <regex>
 #include <random>
 #include <numeric>
+#include <limits>
 #include <nalt.hpp>
 #include <idp.hpp>
 #include <entry.hpp>
@@ -97,7 +98,9 @@ static std::unordered_set<int> load_graph_dirty_set(const std::string& binary_ha
         if (j.contains("dirty") && j["dirty"].is_array())
         {
             for (const auto& id : j["dirty"])
-                if (id.is_number_integer())
+                if (id.is_number_integer()
+                    && id.get<nlohmann::json::number_integer_t>() >= std::numeric_limits<int>::min()
+                    && id.get<nlohmann::json::number_integer_t>() <= std::numeric_limits<int>::max())
                     out.insert(id.get<int>());
         }
     }

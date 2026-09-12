@@ -35,11 +35,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cctype>
 #include <cinttypes>
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <shared_mutex>
 #include <string>
@@ -51,6 +53,30 @@ using json = nlohmann::json;
 using tool_result_t = mcp_standalone::tool_result_t;
 
 namespace analysis_tools {
+
+static bool parse_hex_u64(std::string_view text, uint64_t& value)
+{
+	if (text.empty())
+		return false;
+	if (text.size() >= 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X'))
+		text.remove_prefix(2);
+	if (text.empty())
+		return false;
+	const auto* first = text.data();
+	const auto* last = first + text.size();
+	const auto parsed = std::from_chars(first, last, value, 16);
+	return parsed.ec == std::errc{} && parsed.ptr == last;
+}
+
+struct toolhelp_handle_closer_t {
+	void operator()(void* value) const noexcept
+	{
+		if (value)
+			CloseHandle(static_cast<HANDLE>(value));
+	}
+};
+
+using unique_toolhelp_handle_t = std::unique_ptr<void, toolhelp_handle_closer_t>;
 
 static size_t bounded_size_param(const json& params, const char* name, size_t fallback, size_t minimum, size_t maximum)
 {
@@ -249,6 +275,7 @@ static std::vector<driver_bridge::module_info_t> enumerate_modules_toolhelp(uint
 	HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
 	if (snapshot == INVALID_HANDLE_VALUE)
 		return result;
+	unique_toolhelp_handle_t snapshot_guard(snapshot);
 	MODULEENTRY32W me{};
 	me.dwSize = sizeof(me);
 	if (Module32FirstW(snapshot, &me)) {
@@ -262,7 +289,6 @@ static std::vector<driver_bridge::module_info_t> enumerate_modules_toolhelp(uint
 			me.dwSize = sizeof(me);
 		} while (Module32NextW(snapshot, &me));
 	}
-	CloseHandle(snapshot);
 	std::sort(result.begin(), result.end(), [](const auto& a, const auto& b) {
 		return a.base < b.base;
 	});
@@ -282,18 +308,24 @@ static tool_result_t fuzzer_manage_start(const json& params)
 		return tool_result_t::error("target_address is required");
 
 	fuzzer_engine::fuzz_config_t cfg;
-	cfg.target_address = std::strtoull(target.c_str(), nullptr, 16);
+	if (!parse_hex_u64(target, cfg.target_address))
+		return tool_result_t::error("invalid target_address");
 	if (cfg.target_address == 0)
 		return tool_result_t::error("invalid target_address");
 	if (!end.empty()) {
-		cfg.end_address = std::strtoull(end.c_str(), nullptr, 16);
+		if (!parse_hex_u64(end, cfg.end_address))
+			return tool_result_t::error("invalid end_address");
 		if (cfg.end_address <= cfg.target_address)
 			return tool_result_t::error("end_address must be greater than target_address");
 	} else {
+		if (cfg.target_address == UINT64_MAX)
+			return tool_result_t::error("target_address cannot be the maximum 64-bit address without end_address");
 		cfg.end_address = cfg.target_address + 1;
 	}
-	if (!input.empty())
-		cfg.input_address = std::strtoull(input.c_str(), nullptr, 16);
+	if (!input.empty()) {
+		if (!parse_hex_u64(input, cfg.input_address))
+			return tool_result_t::error("invalid input_address");
+	}
 	cfg.input_size = static_cast<int>(bounded_u32_param(params, "input_size", 256, 1, 1024 * 1024));
 	cfg.max_iterations = bounded_u32_param(params, "max_iterations", 10000, 1, 1000000);
 	cfg.pid = driver_bridge::attached_pid();
@@ -490,7 +522,7 @@ static tool_result_t fuzzer_manage_results(const json&)
 static tool_result_t live_monitor_manage_start(const json& params)
 {
 	std::string addr_str = params.value("address", "");
-	int size = params.value("size", 256);
+	const int size = static_cast<int>(bounded_size_param(params, "size", 256, 1, 1024 * 1024));
 	std::string name = params.value("name", "struct_t");
 	std::string backend = params.value("backend", "auto");
 	uint32_t timeout_ms = bounded_u32_param(params, "timeout_ms", 3000, 100, 3500);
@@ -498,14 +530,13 @@ static tool_result_t live_monitor_manage_start(const json& params)
 		addr_str.c_str(), size, backend.c_str());
 	if (addr_str.empty())
 		return tool_result_t::error("address parameter is required");
-	uint64_t addr = std::strtoull(addr_str.c_str(), nullptr, 16);
+	uint64_t addr = 0;
+	if (!parse_hex_u64(addr_str, addr))
+		return tool_result_t::error("invalid address");
 	if (addr == 0)
 		return tool_result_t::error("invalid address");
 	if (struct_monitor::g_state.active.load())
 		return tool_result_t::error("Live monitor already active. Stop it first.");
-	if (size <= 0)
-		return tool_result_t::error("size must be positive");
-
 	struct_monitor::start(addr, size, name, backend);
 	int max_wait = static_cast<int>((timeout_ms + 49) / 50);
 	for (int wait = 0; wait < max_wait; ++wait) {
@@ -604,10 +635,12 @@ static tool_result_t symbolic_manage_deobfuscate(const json& params)
 	std::string addr_str = params.value("entry_address", "");
 	if (addr_str.empty())
 		return tool_result_t::error("entry_address is required");
-	uint64_t entry = std::strtoull(addr_str.c_str(), nullptr, 16);
+	uint64_t entry = 0;
+	if (!parse_hex_u64(addr_str, entry))
+		return tool_result_t::error("invalid entry_address");
 	if (entry == 0)
 		return tool_result_t::error("invalid entry_address");
-	uint32_t max_insns = static_cast<uint32_t>(params.value("max_instructions", 10000));
+	const uint32_t max_insns = bounded_u32_param(params, "max_instructions", 10000, 1, 1000000);
 	auto result = deobfuscation_engine::deobfuscate_function(entry, max_insns);
 	json out;
 	out["statistics"] = {
@@ -663,9 +696,11 @@ static tool_result_t symbolic_manage_slice(const json& params)
 	std::string reg = params.value("target_register", "");
 	if (start_str.empty() || end_str.empty() || reg.empty())
 		return tool_result_t::error("start_address, end_address, and target_register are required");
-	uint64_t start = std::strtoull(start_str.c_str(), nullptr, 16);
-	uint64_t end = std::strtoull(end_str.c_str(), nullptr, 16);
-	uint32_t max_insns = static_cast<uint32_t>(params.value("max_instructions", 5000));
+	uint64_t start = 0;
+	uint64_t end = 0;
+	if (!parse_hex_u64(start_str, start) || !parse_hex_u64(end_str, end))
+		return tool_result_t::error("invalid address range");
+	const uint32_t max_insns = bounded_u32_param(params, "max_instructions", 5000, 1, 1000000);
 	auto result = symbolic_engine::slice_to_register(start, end, max_insns, reg);
 	json out;
 	out["target_register"] = reg;
@@ -692,9 +727,11 @@ static tool_result_t symbolic_manage_solve_path(const json& params)
 	std::string regs_str = params.value("symbolic_registers", "");
 	if (start_str.empty() || target_str.empty() || regs_str.empty())
 		return tool_result_t::error("start_address, target_address, and symbolic_registers are required");
-	uint64_t start = std::strtoull(start_str.c_str(), nullptr, 16);
-	uint64_t target = std::strtoull(target_str.c_str(), nullptr, 16);
-	uint32_t max_insns = static_cast<uint32_t>(params.value("max_instructions", 5000));
+	uint64_t start = 0;
+	uint64_t target = 0;
+	if (!parse_hex_u64(start_str, start) || !parse_hex_u64(target_str, target))
+		return tool_result_t::error("invalid address range");
+	const uint32_t max_insns = bounded_u32_param(params, "max_instructions", 5000, 1, 1000000);
 	std::vector<std::string> sym_regs;
 	std::istringstream iss(regs_str);
 	std::string tok;
@@ -952,8 +989,8 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 			cfg.max_hits = params.value("max_hits", static_cast<size_t>(0));
 			cfg.timeout_ms = bounded_u32_param(params, "timeout_ms", 4500, 100, 60000);
 			std::string range_base_str = params.value("range_base", std::string());
-			if (!range_base_str.empty())
-				cfg.range_base = std::strtoull(range_base_str.c_str(), nullptr, 16);
+			if (!range_base_str.empty() && !parse_hex_u64(range_base_str, cfg.range_base))
+				return tool_result_t::error("invalid range_base");
 			cfg.range_size = static_cast<uint64_t>(bounded_size_param(params, "range_size", 0, 0, 64ULL * 1024ULL * 1024ULL));
 			if ((!range_base_str.empty() && cfg.range_base == 0) || (cfg.range_size != 0 && cfg.range_base == 0))
 				return tool_result_t::error("invalid range_base");
@@ -1039,7 +1076,7 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 		{}},
 		[](const json& params, const workspace_ptr_t& workspace) -> tool_result_t {
 			std::string addr_str = params.value("address", "");
-			int count = params.value("instruction_count", 16);
+			const int count = static_cast<int>(bounded_size_param(params, "instruction_count", 16, 1, 256));
 			diag::log_tagged_fmt("analysis", "generate_aob_signature entry addr=%s count=%d",
 				addr_str.c_str(), count);
 
@@ -1048,7 +1085,9 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 				return tool_result_t::error("address parameter is required");
 			}
 
-			uint64_t addr = std::strtoull(addr_str.c_str(), nullptr, 16);
+			uint64_t addr = 0;
+			if (!parse_hex_u64(addr_str, addr))
+				return tool_result_t::error("invalid address");
 			if (addr == 0) {
 				diag::log_tagged("analysis", "generate_aob_signature refused invalid_address");
 				return tool_result_t::error("invalid address");
@@ -1118,7 +1157,7 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 		true,
 		[](const json& params) -> tool_result_t {
 			std::string addr_str = params.value("address", "");
-			int size = params.value("size", 256);
+			const int size = static_cast<int>(bounded_size_param(params, "size", 256, 1, 1024 * 1024));
 			std::string name = params.value("name", "struct_t");
 			uint32_t timeout_ms = bounded_u32_param(params, "timeout_ms", 4500, 100, 4500);
 			diag::log_tagged_fmt("analysis", "reconstruct_struct entry addr=%s size=%d name=%s",
@@ -1129,7 +1168,9 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 				return tool_result_t::error("address parameter is required");
 			}
 
-			uint64_t addr = std::strtoull(addr_str.c_str(), nullptr, 16);
+			uint64_t addr = 0;
+			if (!parse_hex_u64(addr_str, addr))
+				return tool_result_t::error("invalid address");
 			if (addr == 0) {
 				diag::log_tagged("analysis", "reconstruct_struct refused invalid_address");
 				return tool_result_t::error("invalid address");
@@ -1213,12 +1254,12 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 		false,
 		[](const json& params) -> tool_result_t {
 			std::string addr_str = params.value("region_address", "");
-			uint64_t size = params.value("region_size", 4096);
+			const uint64_t size = static_cast<uint64_t>(bounded_size_param(params, "region_size", 4096, 1, 64ULL * 1024ULL * 1024ULL));
 			uint32_t timeout_ms = bounded_u32_param(params, "timeout_ms", 4500, 100, 4500);
 			std::string search_start_str = params.value("search_start", "");
-			uint64_t search_start = search_start_str.empty()
-				? 0
-				: std::strtoull(search_start_str.c_str(), nullptr, 16);
+			uint64_t search_start = 0;
+			if (!search_start_str.empty() && !parse_hex_u64(search_start_str, search_start))
+				return tool_result_t::error("invalid search_start");
 			uint64_t search_size = static_cast<uint64_t>(bounded_size_param(params, "search_size", 0, 0, 64ULL * 1024ULL * 1024ULL));
 			diag::log_tagged_fmt("analysis", "auto_decrypt_strings entry addr=%s size=%llu",
 				addr_str.c_str(), static_cast<unsigned long long>(size));
@@ -1228,7 +1269,9 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 				return tool_result_t::error("region_address parameter is required");
 			}
 
-			uint64_t addr = std::strtoull(addr_str.c_str(), nullptr, 16);
+			uint64_t addr = 0;
+			if (!parse_hex_u64(addr_str, addr))
+				return tool_result_t::error("invalid region_address");
 			if (addr == 0) {
 				diag::log_tagged("analysis", "auto_decrypt_strings refused invalid_region_address");
 				return tool_result_t::error("invalid region_address");
@@ -1320,7 +1363,9 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 				return tool_result_t::error("target_address parameter is required");
 			}
 
-			uint64_t addr = std::strtoull(addr_str.c_str(), nullptr, 16);
+			uint64_t addr = 0;
+			if (!parse_hex_u64(addr_str, addr))
+				return tool_result_t::error("invalid address");
 			if (addr == 0) {
 				return tool_result_t::error("invalid target_address");
 			}
@@ -1651,9 +1696,11 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 				return tool_result_t::error("start_address and end_address are required");
 			}
 
-			uint64_t start = std::strtoull(start_str.c_str(), nullptr, 16);
-			uint64_t end = std::strtoull(end_str.c_str(), nullptr, 16);
-			uint32_t max_insns = static_cast<uint32_t>(params.value("max_instructions", 5000));
+			uint64_t start = 0;
+			uint64_t end = 0;
+			if (!parse_hex_u64(start_str, start) || !parse_hex_u64(end_str, end))
+				return tool_result_t::error("invalid address range");
+			const uint32_t max_insns = bounded_u32_param(params, "max_instructions", 5000, 1, 1000000);
 
 			std::vector<std::string> taint_regs;
 			{
@@ -1676,8 +1723,12 @@ void register_analysis_tools(mcp_standalone::server_t& srv)
 				while (std::getline(iss, tok, ',')) {
 					while (!tok.empty() && tok.front() == ' ') tok.erase(tok.begin());
 					while (!tok.empty() && tok.back() == ' ') tok.pop_back();
-					if (!tok.empty())
-						taint_mem.push_back({std::strtoull(tok.c_str(), nullptr, 16), 1});
+					if (!tok.empty()) {
+						uint64_t address = 0;
+						if (!parse_hex_u64(tok, address))
+							return tool_result_t::error("invalid taint_memory address");
+						taint_mem.push_back({address, 1});
+					}
 				}
 			}
 

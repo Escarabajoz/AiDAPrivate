@@ -330,9 +330,10 @@ inline bool load_chat_messages(const std::string& task_id, std::vector<chat_mess
     try {
         auto arr = nlohmann::json::parse(ifs);
         if (!arr.is_array()) return false;
+        if (arr.size() > 100000) return false;
 
         out.clear();
-        out.reserve(arr.size());
+        out.reserve((std::min)(arr.size(), static_cast<size_t>(100000)));
         for (auto& j : arr) {
             if (!j.is_object()) continue;
             chat_message_t m;
@@ -394,9 +395,10 @@ inline bool load_api_messages(const std::string& task_id, std::vector<api_messag
     try {
         auto arr = nlohmann::json::parse(ifs);
         if (!arr.is_array()) return false;
+        if (arr.size() > 100000) return false;
 
         out.clear();
-        out.reserve(arr.size());
+        out.reserve((std::min)(arr.size(), static_cast<size_t>(100000)));
         for (auto& j : arr) {
             if (!j.is_object()) continue;
             api_message_t m;

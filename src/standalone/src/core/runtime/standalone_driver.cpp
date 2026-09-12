@@ -476,6 +476,10 @@ namespace
         HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
         if (snapshot == INVALID_HANDLE_VALUE)
             return 0;
+        struct snapshot_guard_t {
+            HANDLE value;
+            ~snapshot_guard_t() { CloseHandle(value); }
+        } snapshot_guard{snapshot};
         THREADENTRY32 entry{};
         entry.dwSize = sizeof(entry);
         if (Thread32First(snapshot, &entry)) {
@@ -485,7 +489,6 @@ namespace
                 entry.dwSize = sizeof(entry);
             } while (Thread32Next(snapshot, &entry));
         }
-        CloseHandle(snapshot);
         return count;
     }
 
@@ -3692,9 +3695,16 @@ namespace
     {
         if (!text || !*text)
             return {};
-        char narrow[MAX_PATH * 2] = {};
-        WideCharToMultiByte(CP_UTF8, 0, text, -1, narrow, sizeof(narrow), nullptr, nullptr);
-        return narrow;
+        const int required = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1,
+                                                  nullptr, 0, nullptr, nullptr);
+        if (required <= 1)
+            return {};
+        std::string result(static_cast<std::size_t>(required), '\0');
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, result.data(),
+                                required, nullptr, nullptr) != required)
+            return {};
+        result.resize(static_cast<std::size_t>(required - 1));
+        return result;
     }
 
     bool refresh_process_name_locked()

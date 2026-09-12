@@ -166,7 +166,7 @@ void register_tech_tools(mcp_standalone::server_t& srv)
         t.description = "Fetch a URL and identify the underlying technology stack (web server, framework, CMS, "
                         "front-end library, CDN, analytics, auth) using header + body regex rules.";
         t.params = { {"url", "string", "Full URL", true} };
-        t.read_only = true;
+        t.read_only = false;
         t.handler = tool_fingerprint;
         srv.register_tool(std::move(t));
     }

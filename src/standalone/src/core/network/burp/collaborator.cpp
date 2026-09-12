@@ -293,6 +293,7 @@ static bool hmac_sha256_hex(const std::string& secret, const std::string& body, 
         if (BCryptGetProperty(alg, BCRYPT_HASH_LENGTH, reinterpret_cast<PUCHAR>(&hash_len), sizeof(hash_len), &got, 0) < 0) break;
         std::vector<uint8_t> object(object_len);
         std::vector<uint8_t> digest(hash_len);
+        if (secret.size() > static_cast<size_t>(ULONG_MAX) || body.size() > static_cast<size_t>(ULONG_MAX)) break;
         if (BCryptCreateHash(alg, &hash, object.data(), object_len,
                              reinterpret_cast<PUCHAR>(const_cast<char*>(secret.data())),
                              static_cast<ULONG>(secret.size()), 0) < 0) break;

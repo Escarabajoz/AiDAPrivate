@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
@@ -1153,11 +1155,26 @@ inline int extract_int_param(const nlohmann::json& params, const char* key, int 
     try
     {
         if (it->is_number_integer())
-            return it->get<int>();
+        {
+            const std::int64_t value = it->get<std::int64_t>();
+            if (value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_number_unsigned())
-            return static_cast<int>(it->get<std::uint64_t>());
+        {
+            const std::uint64_t value = it->get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_number())
-            return static_cast<int>(it->get<double>());
+        {
+            const double value = it->get<double>();
+            if (!std::isfinite(value) || value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_string())
         {
             const std::string s = it->get<std::string>();

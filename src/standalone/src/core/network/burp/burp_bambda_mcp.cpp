@@ -72,13 +72,15 @@ tool_result_t tool_compile(const json& params)
         diag::log_tagged_fmt("mcp_burp", "bambda_compile missing_source");
         return tool_result_t::error("missing_source");
     }
+    if (params["source"].get_ref<const std::string&>().size() > 65536)
+        return tool_result_t::error("source exceeds 65536 bytes");
     auto p = compile(params["source"].get<std::string>());
     diag::log_tagged_fmt("mcp_burp", "bambda_compile ok valid=%d err=%s", (int)p.valid, p.error.c_str());
     json j;
     j["valid"] = p.valid;
     j["error"] = p.error;
     j["source"] = p.source;
-    return tool_result_t::ok(j);
+    return p.valid ? tool_result_t::ok(j) : tool_result_t::error("bambda compile failed", j);
 }
 
 tool_result_t tool_test(const json& params)
@@ -94,6 +96,10 @@ tool_result_t tool_test(const json& params)
         diag::log_tagged_fmt("mcp_burp", "bambda_test missing_row");
         return tool_result_t::error("missing_row");
     }
+    if (params["source"].get_ref<const std::string&>().size() > 65536)
+        return tool_result_t::error("source exceeds 65536 bytes");
+    if (params["row"].dump().size() > 1048576)
+        return tool_result_t::error("row exceeds 1048576 serialized bytes");
     auto p = compile(params["source"].get<std::string>());
     if (!p.valid)
     {
@@ -101,7 +107,7 @@ tool_result_t tool_test(const json& params)
         json j;
         j["valid"] = false;
         j["error"] = p.error;
-        return tool_result_t::ok(j);
+        return tool_result_t::error("bambda compile failed", j);
     }
     auto provider = make_provider_for_json_object(params["row"]);
     bool match = evaluate(p, provider);

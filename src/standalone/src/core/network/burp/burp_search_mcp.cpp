@@ -365,25 +365,47 @@ void search_ws(result_sink_t& sink, const matcher_t& matcher, const std::string&
 
 tool_result_t tool_search(const json& params)
 {
+    if (!params.is_object())
+        return tool_result_t::error("parameters must be an object");
     if (!params.contains("query") || !params["query"].is_string() || params["query"].get<std::string>().empty())
         return tool_result_t::error("missing_query");
+    if (params["query"].get_ref<const std::string&>().size() > 4096)
+        return tool_result_t::error("query exceeds 4096 bytes");
     result_sink_t sink;
-    sink.limit = params.value("limit", 50u);
-    if (sink.limit == 0)
-        sink.limit = 50;
-    if (sink.limit > 500)
-        sink.limit = 500;
+    if (params.contains("limit")) {
+        if (!params["limit"].is_number_integer())
+            return tool_result_t::error("limit must be an integer");
+        const auto limit = params["limit"].get<long long>();
+        if (limit < 1 || limit > 500)
+            return tool_result_t::error("limit must be in 1..500");
+        sink.limit = static_cast<size_t>(limit);
+    }
+    if (params.contains("include_bodies") && !params["include_bodies"].is_boolean())
+        return tool_result_t::error("include_bodies must be a boolean");
+    if (params.contains("scope_only") && !params["scope_only"].is_boolean())
+        return tool_result_t::error("scope_only must be a boolean");
+    if (params.contains("search_in") && !params["search_in"].is_string())
+        return tool_result_t::error("search_in must be a string");
     sink.include_bodies = params.value("include_bodies", false);
     const std::string search_in = lower_ascii(params.value("search_in", std::string("all")));
+    if (search_in != "all" && search_in != "request" && search_in != "response" &&
+        search_in != "headers" && search_in != "body" && search_in != "url")
+        return tool_result_t::error("search_in must be request, response, headers, body, url, or all");
     const bool scope_only = params.value("scope_only", false);
     const matcher_t matcher = make_matcher(params["query"].get<std::string>());
+    if (mcp_standalone::current_call_cancelled())
+        return tool_result_t::error("search cancelled");
     search_sitemap(sink, matcher, search_in, scope_only);
+    if (mcp_standalone::current_call_cancelled())
+        return tool_result_t::error("search cancelled");
     search_proxy(sink, matcher, search_in);
     if (search_in.empty() || search_in == "all" || search_in == "url")
         search_logger(sink, matcher);
     search_issues(sink, matcher, search_in);
     search_collaborator(sink, matcher, search_in);
     search_ws(sink, matcher, search_in);
+    if (mcp_standalone::current_call_cancelled())
+        return tool_result_t::error("search cancelled");
     json sources = json::object();
     size_t total = 0;
     for (const auto& kv : sink.source_counts) {

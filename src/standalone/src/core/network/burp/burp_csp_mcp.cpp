@@ -60,6 +60,8 @@ tool_result_t tool_analyze(const json& params)
         diag::log_tagged_fmt("mcp_burp", "csp_analyze missing_csp_header_value");
         return tool_result_t::error("missing_csp_header_value");
     }
+    if (params["csp_header_value"].get_ref<const std::string&>().size() > 65536)
+        return tool_result_t::error("csp_header_value exceeds 65536 bytes");
     bool report_only = false;
     if (params.contains("is_report_only") && params["is_report_only"].is_boolean())
         report_only = params["is_report_only"].get<bool>();
@@ -158,7 +160,7 @@ void register_csp_tools(mcp_standalone::server_t& srv)
         t.params = {
             {"url", "string", "Full URL including scheme (http/https)", true},
         };
-        t.read_only = true;
+        t.read_only = false;
         t.handler = tool_analyze_url;
         srv.register_tool(std::move(t));
     }

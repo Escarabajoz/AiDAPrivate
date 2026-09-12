@@ -9,10 +9,12 @@
 #include "../agent_tools.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <ios>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -40,11 +42,23 @@ int clamp_timeout(const json& params, const char* key, int default_ms, int max_m
     {
         const auto& v = params.at(key);
         if (v.is_number_integer())
-            requested = v.get<int>();
+        {
+            const std::int64_t value = v.get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                requested = static_cast<int>(value);
+        }
         else if (v.is_number_unsigned())
-            requested = static_cast<int>(v.get<uint64_t>());
+        {
+            const std::uint64_t value = v.get<std::uint64_t>();
+            if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                requested = static_cast<int>(value);
+        }
         else if (v.is_number_float())
-            requested = static_cast<int>(v.get<double>());
+        {
+            const double value = v.get<double>();
+            if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                requested = static_cast<int>(value);
+        }
         else if (v.is_string())
         {
             const std::string& s = v.get_ref<const std::string&>();
@@ -52,7 +66,7 @@ int clamp_timeout(const json& params, const char* key, int default_ms, int max_m
             {
                 char* end_ptr = nullptr;
                 long parsed = std::strtol(s.c_str(), &end_ptr, 0);
-                if (end_ptr != s.c_str())
+                if (end_ptr != s.c_str() && parsed >= (std::numeric_limits<int>::min)() && parsed <= (std::numeric_limits<int>::max)())
                     requested = static_cast<int>(parsed);
             }
         }
@@ -71,11 +85,23 @@ int clamp_int_param(const json& params, const char* key, int default_value, int 
     {
         const auto& v = params.at(key);
         if (v.is_number_integer())
-            requested = v.get<int>();
+        {
+            const std::int64_t value = v.get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                requested = static_cast<int>(value);
+        }
         else if (v.is_number_unsigned())
-            requested = static_cast<int>(v.get<uint64_t>());
+        {
+            const std::uint64_t value = v.get<std::uint64_t>();
+            if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                requested = static_cast<int>(value);
+        }
         else if (v.is_number_float())
-            requested = static_cast<int>(v.get<double>());
+        {
+            const double value = v.get<double>();
+            if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                requested = static_cast<int>(value);
+        }
         else if (v.is_string())
         {
             const std::string& s = v.get_ref<const std::string&>();
@@ -83,7 +109,7 @@ int clamp_int_param(const json& params, const char* key, int default_value, int 
             {
                 char* end_ptr = nullptr;
                 long parsed = std::strtol(s.c_str(), &end_ptr, 0);
-                if (end_ptr != s.c_str())
+                if (end_ptr != s.c_str() && parsed >= (std::numeric_limits<int>::min)() && parsed <= (std::numeric_limits<int>::max)())
                     requested = static_cast<int>(parsed);
             }
         }
@@ -103,9 +129,19 @@ int64_t extract_int64_param(const json& params, const char* key, int64_t default
     if (v.is_number_integer())
         return v.get<int64_t>();
     if (v.is_number_unsigned())
-        return static_cast<int64_t>(v.get<uint64_t>());
+    {
+        const std::uint64_t value = v.get<std::uint64_t>();
+        if (value > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+            return default_value;
+        return static_cast<int64_t>(value);
+    }
     if (v.is_number_float())
-        return static_cast<int64_t>(v.get<double>());
+    {
+        const double value = v.get<double>();
+        if (!std::isfinite(value) || value < static_cast<double>((std::numeric_limits<std::int64_t>::min)()) || value > static_cast<double>((std::numeric_limits<std::int64_t>::max)()))
+            return default_value;
+        return static_cast<int64_t>(value);
+    }
     if (v.is_string())
     {
         const std::string& s = v.get_ref<const std::string&>();
@@ -147,13 +183,21 @@ exploit_constraints_t extract_input_shape(const json& params)
     if (s.contains("printable_only") && s["printable_only"].is_boolean())
         out.printable_only = s["printable_only"].get<bool>();
     if (s.contains("alignment") && s["alignment"].is_number_integer())
-        out.alignment = std::max(1, std::min(4096, s["alignment"].get<int>()));
+    {
+        const std::int64_t value = s["alignment"].get<std::int64_t>();
+        if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+            out.alignment = std::max(1, std::min(4096, static_cast<int>(value)));
+    }
     if (s.contains("max_byte"))
     {
         if (s["max_byte"].is_number_unsigned())
             out.max_byte = std::min<uint64_t>(255, s["max_byte"].get<uint64_t>());
         else if (s["max_byte"].is_number_integer())
-            out.max_byte = static_cast<uint64_t>(std::max(0, std::min(255, s["max_byte"].get<int>())));
+        {
+            const std::int64_t value = s["max_byte"].get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                out.max_byte = static_cast<uint64_t>(std::max(0, std::min(255, static_cast<int>(value))));
+        }
     }
     return out;
 }

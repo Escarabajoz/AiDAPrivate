@@ -698,6 +698,8 @@ namespace ida_utils
     {
         if (s.length() > max_len)
         {
+            if (max_len <= 3)
+                return s.substr(0, max_len);
             return s.substr(0, max_len - 3) + "...";
         }
         return s;

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <utility>
 
 #include <diskio.hpp>
@@ -308,9 +309,9 @@ std::vector<std::uint8_t> load_ledger_blob(validation_result_t& validation)
             validation.add("store_read_failed", "/ledger", "failed to read ledger page");
             break;
         }
-        const auto* bytes = static_cast<const std::uint8_t*>(blob);
+        const std::unique_ptr<void, decltype(&qfree)> blob_guard(blob, &qfree);
+        const auto* bytes = static_cast<const std::uint8_t*>(blob_guard.get());
         packed.insert(packed.end(), bytes, bytes + size);
-        qfree(blob);
     }
     return packed;
 }

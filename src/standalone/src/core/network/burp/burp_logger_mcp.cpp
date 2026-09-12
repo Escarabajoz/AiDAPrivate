@@ -75,10 +75,18 @@ tool_result_t handle_query(const json& p)
 {
     diag::log_tagged_fmt("mcp_burp", "logger_query entry");
     size_t limit = 100;
-    if (p.contains("limit") && p["limit"].is_number())
-        limit = static_cast<size_t>(p["limit"].get<int>());
-    else if (p.contains("filter") && p["filter"].is_object() && p["filter"].contains("limit") && p["filter"]["limit"].is_number())
-        limit = static_cast<size_t>(p["filter"]["limit"].get<int>());
+    auto parse_limit = [](const json& v, size_t& out) -> bool {
+        if (!v.is_number_integer()) return false;
+        long long vv = v.get<long long>();
+        if (vv < 0 || vv > 100000) return false;
+        out = static_cast<size_t>(vv);
+        return true;
+    };
+    if (p.contains("limit")) {
+        if (!parse_limit(p["limit"], limit)) return tool_result_t::error("limit must be in 0..100000");
+    } else if (p.contains("filter") && p["filter"].is_object() && p["filter"].contains("limit")) {
+        if (!parse_limit(p["filter"]["limit"], limit)) return tool_result_t::error("limit must be in 0..100000");
+    }
     auto f = build_filter(p);
     auto rows = logger::query(f, limit);
     json arr = json::array();
@@ -154,12 +162,14 @@ tool_result_t handle_export_csv(const json& p)
 tool_result_t handle_set_capacity(const json& p)
 {
     diag::log_tagged_fmt("mcp_burp", "logger_set_capacity entry");
-    if (!p.contains("capacity") || !p["capacity"].is_number())
+    if (!p.contains("capacity") || !p["capacity"].is_number_integer())
     {
         diag::log_tagged_fmt("mcp_burp", "logger_set_capacity missing_capacity");
         return tool_result_t::error("capacity parameter required for set_capacity action");
     }
-    size_t cap = static_cast<size_t>(p["capacity"].get<int>());
+    long long cv = p["capacity"].get<long long>();
+    if (cv < 1 || cv > 1000000) return tool_result_t::error("capacity must be in 1..1000000");
+    size_t cap = static_cast<size_t>(cv);
     diag::log_tagged_fmt("mcp_burp", "logger_set_capacity capacity=%zu", cap);
     logger::set_capacity(cap);
     size_t actual = logger::capacity();

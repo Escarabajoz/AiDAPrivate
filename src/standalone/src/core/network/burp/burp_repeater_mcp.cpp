@@ -301,7 +301,12 @@ tool_result_t handle_send(const json& p)
     }
     const std::string host = p["host"].get<std::string>();
     uint16_t port = 443;
-    if (p.contains("port") && p["port"].is_number()) port = static_cast<uint16_t>(p["port"].get<int>());
+    if (p.contains("port")) {
+        if (!p["port"].is_number_integer()) return tool_result_t::error("port must be an integer in 1..65535");
+        long long v = p["port"].get<long long>();
+        if (v < 1 || v > 65535) return tool_result_t::error("port must be in 1..65535");
+        port = static_cast<uint16_t>(v);
+    }
     bool use_tls = true;
     if (p.contains("use_tls") && p["use_tls"].is_boolean()) use_tls = p["use_tls"].get<bool>();
     std::string name;
@@ -358,11 +363,21 @@ tool_result_t handle_send_raw(const json& p)
     }
     const std::string host = p["host"].get<std::string>();
     uint16_t port = 443;
-    if (p.contains("port") && p["port"].is_number()) port = static_cast<uint16_t>(p["port"].get<int>());
+    if (p.contains("port")) {
+        if (!p["port"].is_number_integer()) return tool_result_t::error("port must be an integer in 1..65535");
+        long long v = p["port"].get<long long>();
+        if (v < 1 || v > 65535) return tool_result_t::error("port must be in 1..65535");
+        port = static_cast<uint16_t>(v);
+    }
     bool use_tls = true;
     if (p.contains("use_tls") && p["use_tls"].is_boolean()) use_tls = p["use_tls"].get<bool>();
     int timeout_ms = 15000;
-    if (p.contains("timeout_ms") && p["timeout_ms"].is_number()) timeout_ms = p["timeout_ms"].get<int>();
+    if (p.contains("timeout_ms")) {
+        if (!p["timeout_ms"].is_number_integer()) return tool_result_t::error("timeout_ms must be an integer");
+        long long tv = p["timeout_ms"].get<long long>();
+        if (tv < 1 || tv > 300000) return tool_result_t::error("timeout_ms must be in 1..300000");
+        timeout_ms = static_cast<int>(tv);
+    }
     bool follow_redirects = false;
     if (p.contains("follow_redirects") && p["follow_redirects"].is_boolean()) follow_redirects = p["follow_redirects"].get<bool>();
 
@@ -415,23 +430,24 @@ tool_result_t handle_send_from_exchange(const json& p)
     const uint64_t exchange_id = p["exchange_id"].get<uint64_t>();
     diag::log_tagged_fmt("mcp_burp", "repeater_send_from_exchange id=%llu", static_cast<unsigned long long>(exchange_id));
 
-    const mitm_proxy::http_exchange* ex = mitm_proxy::find_exchange(exchange_id);
-    if (!ex)
+    const auto exchanges = mitm_proxy::get_history_by_ids({exchange_id});
+    if (exchanges.empty())
     {
         diag::log_tagged_fmt("mcp_burp", "repeater_send_from_exchange not_found id=%llu", static_cast<unsigned long long>(exchange_id));
         return tool_result_t::error("exchange not found");
     }
 
-    if (ex->raw_request.empty())
+    const auto& ex = exchanges.front();
+    if (ex.raw_request.empty())
     {
         diag::log_tagged_fmt("mcp_burp", "repeater_send_from_exchange empty_request id=%llu", static_cast<unsigned long long>(exchange_id));
         return tool_result_t::error("exchange has no raw request data");
     }
 
-    std::vector<uint8_t> raw_request = ex->raw_request;
-    std::string host = ex->target_host;
-    uint16_t port = ex->target_port;
-    bool use_tls = ex->is_tls;
+    std::vector<uint8_t> raw_request = ex.raw_request;
+    std::string host = ex.target_host;
+    uint16_t port = ex.target_port;
+    bool use_tls = ex.is_tls;
 
     if (host.empty())
     {
@@ -446,7 +462,12 @@ tool_result_t handle_send_from_exchange(const json& p)
     }
 
     int timeout_ms = 15000;
-    if (p.contains("timeout_ms") && p["timeout_ms"].is_number()) timeout_ms = p["timeout_ms"].get<int>();
+    if (p.contains("timeout_ms")) {
+        if (!p["timeout_ms"].is_number_integer()) return tool_result_t::error("timeout_ms must be an integer");
+        const auto value = p["timeout_ms"].get<long long>();
+        if (value < 1 || value > 300000) return tool_result_t::error("timeout_ms must be in 1..300000");
+        timeout_ms = static_cast<int>(value);
+    }
     bool follow_redirects = false;
     if (p.contains("follow_redirects") && p["follow_redirects"].is_boolean()) follow_redirects = p["follow_redirects"].get<bool>();
 

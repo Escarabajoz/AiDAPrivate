@@ -95,6 +95,7 @@ AidaDockHost::AidaDockHost(QMainWindow* window, QObject* parent)
     registry_ = new registry::qt_view_registry_t(this);
 
     manager_ = new ads::CDockManager(window_);
+    manager_->setStyleSheet(QString());
     diag::log_tagged_critical_fmt("qt_dock_host",
         "dock_manager_created manager=0x%llX focus_highlighting=%d tid=%lu",
         static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(manager_)),

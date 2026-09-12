@@ -2,12 +2,15 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
 #include <functional>
 #include <iomanip>
 #include <iterator>
+#include <limits>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <set>
@@ -3169,7 +3172,20 @@ void summary_from_json(const nlohmann::json& j, func_summary_t& s)
     s.returns_alloc   = j.value("returns_alloc", false);
     s.returns_free    = j.value("returns_free", false);
     auto load_int_set = [&](const char* k, std::set<int>& dst) {
-        if (j.contains(k) && j[k].is_array()) for (auto& v : j[k]) dst.insert(v.get<int>());
+        if (j.contains(k) && j[k].is_array()) for (auto& v : j[k]) {
+            if (v.is_number_integer())
+            {
+                const std::int64_t value = v.get<std::int64_t>();
+                if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                    dst.insert(static_cast<int>(value));
+            }
+            else if (v.is_number_unsigned())
+            {
+                const std::uint64_t value = v.get<std::uint64_t>();
+                if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                    dst.insert(static_cast<int>(value));
+            }
+        }
     };
     auto load_str_set = [&](const char* k, std::set<std::string>& dst) {
         if (j.contains(k) && j[k].is_array()) for (auto& v : j[k]) dst.insert(v.get<std::string>());
@@ -3217,7 +3233,20 @@ void summary_from_json(const nlohmann::json& j, func_summary_t& s)
             int idx = parse_index(it.key());
             if (idx < 0 || !it.value().is_array()) continue;
             for (const auto& v : it.value())
-                s.param_inferred_kinds[idx].insert(static_cast<taint_kind_t>(v.get<int>()));
+            {
+                if (v.is_number_integer())
+                {
+                    const std::int64_t value = v.get<std::int64_t>();
+                    if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                        s.param_inferred_kinds[idx].insert(static_cast<taint_kind_t>(static_cast<int>(value)));
+                }
+                else if (v.is_number_unsigned())
+                {
+                    const std::uint64_t value = v.get<std::uint64_t>();
+                    if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                        s.param_inferred_kinds[idx].insert(static_cast<taint_kind_t>(static_cast<int>(value)));
+                }
+            }
         }
     }
     if (j.contains("tainted_fields") && j["tainted_fields"].is_object()) {
@@ -3225,7 +3254,20 @@ void summary_from_json(const nlohmann::json& j, func_summary_t& s)
             int idx = parse_index(it.key());
             if (idx < 0 || !it.value().is_array()) continue;
             for (const auto& v : it.value())
-                s.tainted_fields[idx].insert(v.get<int>());
+            {
+                if (v.is_number_integer())
+                {
+                    const std::int64_t value = v.get<std::int64_t>();
+                    if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                        s.tainted_fields[idx].insert(static_cast<int>(value));
+                }
+                else if (v.is_number_unsigned())
+                {
+                    const std::uint64_t value = v.get<std::uint64_t>();
+                    if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                        s.tainted_fields[idx].insert(static_cast<int>(value));
+                }
+            }
         }
     }
 }
@@ -3271,7 +3313,20 @@ void reach_record_from_json(const nlohmann::json& j, reach_record_t& r)
 {
     if (j.contains("input_kinds") && j["input_kinds"].is_array())
         for (const auto& v : j["input_kinds"])
-            r.input_kinds.insert(static_cast<taint_kind_t>(v.get<int>()));
+        {
+            if (v.is_number_integer())
+            {
+                const std::int64_t value = v.get<std::int64_t>();
+                if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                    r.input_kinds.insert(static_cast<taint_kind_t>(static_cast<int>(value)));
+            }
+            else if (v.is_number_unsigned())
+            {
+                const std::uint64_t value = v.get<std::uint64_t>();
+                if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                    r.input_kinds.insert(static_cast<taint_kind_t>(static_cast<int>(value)));
+            }
+        }
     if (j.contains("input_callsites") && j["input_callsites"].is_array())
         for (const auto& row : j["input_callsites"])
             if (row.is_object())
@@ -3377,9 +3432,9 @@ bool TaintEngine::load_summaries_from_netnode()
         if (blob != nullptr) qfree(blob);
         return false;
     }
-    std::vector<std::uint8_t> buf(static_cast<std::uint8_t*>(blob),
-                                  static_cast<std::uint8_t*>(blob) + sz);
-    qfree(blob);
+    const std::unique_ptr<void, decltype(&qfree)> blob_guard(blob, &qfree);
+    std::vector<std::uint8_t> buf(static_cast<const std::uint8_t*>(blob_guard.get()),
+                                  static_cast<const std::uint8_t*>(blob_guard.get()) + sz);
     nlohmann::json doc;
     try {
         doc = nlohmann::json::from_cbor(buf);
@@ -3431,11 +3486,26 @@ int extract_int_param(const json& params, const std::string& key, int default_va
     try
     {
         if (it->is_number_integer())
-            return it->get<int>();
+        {
+            const std::int64_t value = it->get<std::int64_t>();
+            if (value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_number_unsigned())
-            return static_cast<int>(it->get<std::uint64_t>());
+        {
+            const std::uint64_t value = it->get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_number())
-            return static_cast<int>(it->get<double>());
+        {
+            const double value = it->get<double>();
+            if (!std::isfinite(value) || value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_string())
         {
             const std::string s = it->get<std::string>();

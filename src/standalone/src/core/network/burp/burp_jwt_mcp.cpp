@@ -96,8 +96,24 @@ tool_result_t handle_crack_start(const json& params)
             if (w.is_string()) cfg.custom_words.push_back(w.get<std::string>());
         }
     }
-    cfg.concurrency = static_cast<size_t>(params.value("concurrency", 8));
-    cfg.max_attempts = static_cast<size_t>(params.value("max_attempts", 1000000));
+    {
+        long long cv = 8;
+        if (params.contains("concurrency")) {
+            if (!params["concurrency"].is_number_integer()) return tool_result_t::error("concurrency must be an integer");
+            cv = params["concurrency"].get<long long>();
+            if (cv < 1 || cv > 64) return tool_result_t::error("concurrency must be in 1..64");
+        }
+        cfg.concurrency = static_cast<size_t>(cv);
+    }
+    {
+        long long mv = 1000000;
+        if (params.contains("max_attempts")) {
+            if (!params["max_attempts"].is_number_integer()) return tool_result_t::error("max_attempts must be an integer");
+            mv = params["max_attempts"].get<long long>();
+            if (mv < 1 || mv > 10000000) return tool_result_t::error("max_attempts must be in 1..10000000");
+        }
+        cfg.max_attempts = static_cast<size_t>(mv);
+    }
     const uint64_t id = jwt_lab::start_crack(cfg);
     if (id == 0) { diag::log_tagged_fmt("mcp_burp", "jwt_crack_start failed err=%s", jwt_lab::last_error().c_str()); return tool_result_t::error(std::string("start_crack failed: ") + jwt_lab::last_error()); }
     diag::log_tagged_fmt("mcp_burp", "jwt_crack_start ok crack_id=%llu", static_cast<unsigned long long>(id));

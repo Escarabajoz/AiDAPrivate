@@ -15,6 +15,7 @@
 #include <cctype>
 #include <cstdint>
 #include <iomanip>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -85,27 +86,37 @@ static std::string lower_ascii(std::string s) {
 }
 
 static std::wstring utf8_to_wide(const std::string& s) {
-    if (s.empty())
+    if (s.empty() || s.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
         return {};
-    int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    if (needed <= 0)
-        needed = MultiByteToWideChar(CP_ACP, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    const int length = static_cast<int>(s.size());
+    UINT code_page = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    int needed = MultiByteToWideChar(code_page, flags, s.data(), length, nullptr, 0);
+    if (needed <= 0) {
+        code_page = CP_ACP;
+        flags = 0;
+        needed = MultiByteToWideChar(code_page, flags, s.data(), length, nullptr, 0);
+    }
     if (needed <= 0)
         return {};
     std::wstring out(static_cast<std::size_t>(needed), L'\0');
-    if (MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), needed) <= 0)
-        MultiByteToWideChar(CP_ACP, 0, s.c_str(), static_cast<int>(s.size()), out.data(), needed);
+    if (MultiByteToWideChar(code_page, flags, s.data(), length, out.data(), needed) != needed)
+        return {};
     return out;
 }
 
 static std::string wide_to_utf8(const std::wstring& s) {
-    if (s.empty())
+    if (s.empty() || s.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
         return {};
-    const int needed = WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0, nullptr, nullptr);
+    const int length = static_cast<int>(s.size());
+    const int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, s.data(), length,
+                                            nullptr, 0, nullptr, nullptr);
     if (needed <= 0)
         return {};
     std::string out(static_cast<std::size_t>(needed), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), out.data(), needed, nullptr, nullptr);
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, s.data(), length, out.data(), needed,
+                            nullptr, nullptr) != needed)
+        return {};
     return out;
 }
 

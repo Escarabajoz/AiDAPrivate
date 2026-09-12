@@ -55,6 +55,20 @@ bool commit_lifecycle(request_t, std::string& error) noexcept
 #else
 namespace {
 
+struct file_handle_guard_t {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    explicit file_handle_guard_t(HANDLE handle) noexcept : value(handle) {}
+    ~file_handle_guard_t() noexcept { close(); }
+    void close() noexcept {
+        if (value != INVALID_HANDLE_VALUE) {
+            ::CloseHandle(value);
+            value = INVALID_HANDLE_VALUE;
+        }
+    }
+    file_handle_guard_t(const file_handle_guard_t&) = delete;
+    file_handle_guard_t& operator=(const file_handle_guard_t&) = delete;
+};
+
 constexpr std::uint64_t kMaximumConversationBytes = 32ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumEvidenceBytes = 2ULL * 1024ULL * 1024ULL;
 constexpr std::uint64_t kMaximumCatalogAggregateBytes = 256ULL * 1024ULL * 1024ULL;
@@ -167,10 +181,10 @@ bool exact_child(const std::filesystem::path& root,
 bool read_exact(const std::filesystem::path& path, std::uint64_t maximum,
     std::string& bytes, std::string& error, bool absent_ok = false) noexcept
 {
-    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ,
+    file_handle_guard_t file(::CreateFileW(path.c_str(), GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) {
         if (absent_ok && ::GetLastError() == ERROR_FILE_NOT_FOUND) {
             bytes.clear();
             return true;
@@ -179,15 +193,13 @@ bool read_exact(const std::filesystem::path& path, std::uint64_t maximum,
         return false;
     }
     LARGE_INTEGER size{};
-    if (!::GetFileSizeEx(file, &size) || size.QuadPart < 0 ||
+    if (!::GetFileSizeEx(file.value, &size) || size.QuadPart < 0 ||
         static_cast<std::uint64_t>(size.QuadPart) > maximum) {
-        ::CloseHandle(file);
         error = "A conversation store file exceeds its exact bound.";
         return false;
     }
     try { bytes.resize(static_cast<std::size_t>(size.QuadPart)); }
     catch (...) {
-        ::CloseHandle(file);
         error = "A bounded conversation store buffer could not be allocated.";
         return false;
     }
@@ -197,13 +209,12 @@ bool read_exact(const std::filesystem::path& path, std::uint64_t maximum,
         const DWORD chunk = static_cast<DWORD>((std::min)(bytes.size() - offset,
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
         DWORD read = 0;
-        if (!::ReadFile(file, bytes.data() + offset, chunk, &read, nullptr) || read == 0) {
+        if (!::ReadFile(file.value, bytes.data() + offset, chunk, &read, nullptr) || read == 0) {
             ok = false;
             break;
         }
         offset += read;
     }
-    ::CloseHandle(file);
     if (!ok || offset != bytes.size()) {
         bytes.clear();
         error = "A conversation store file could not be read exactly.";
@@ -221,9 +232,9 @@ bool write_atomic(const std::filesystem::path& path, std::string_view bytes,
     }
     std::filesystem::path temporary = path;
     temporary += L".aida-" + std::to_wstring(serial) + L".tmp";
-    HANDLE file = ::CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+    file_handle_guard_t file(::CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) {
         error = "A conversation store temporary file could not be created.";
         return false;
     }
@@ -233,7 +244,7 @@ bool write_atomic(const std::filesystem::path& path, std::string_view bytes,
         const DWORD chunk = static_cast<DWORD>((std::min)(bytes.size() - offset,
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
         DWORD written = 0;
-        if (!::WriteFile(file, bytes.data() + offset, chunk, &written, nullptr) ||
+        if (!::WriteFile(file.value, bytes.data() + offset, chunk, &written, nullptr) ||
             written != chunk) {
             ok = false;
             break;
@@ -241,10 +252,10 @@ bool write_atomic(const std::filesystem::path& path, std::string_view bytes,
         offset += written;
     }
     LARGE_INTEGER size{};
-    if (ok) ok = ::FlushFileBuffers(file) != FALSE;
-    if (ok) ok = ::GetFileSizeEx(file, &size) != FALSE &&
+    if (ok) ok = ::FlushFileBuffers(file.value) != FALSE;
+    if (ok) ok = ::GetFileSizeEx(file.value, &size) != FALSE &&
         size.QuadPart == static_cast<LONGLONG>(bytes.size());
-    ::CloseHandle(file);
+    file.close();
     if (ok) ok = ::MoveFileExW(temporary.c_str(), path.c_str(),
         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
     if (!ok) {

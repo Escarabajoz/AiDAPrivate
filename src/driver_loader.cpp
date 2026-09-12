@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cwchar>
+#include <limits>
 #include <string>
 #include <vector>
 #include <filesystem>
@@ -196,15 +197,17 @@ namespace
 
     std::string utf8_from_wide(const std::wstring& w)
     {
-        if (w.empty())
+        if (w.empty() || w.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)()))
             return {};
-        int needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-            static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+        const int length = static_cast<int>(w.size());
+        int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w.data(),
+            length, nullptr, 0, nullptr, nullptr);
         if (needed <= 0)
             return {};
         std::string out(static_cast<size_t>(needed), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(),
-            static_cast<int>(w.size()), out.data(), needed, nullptr, nullptr);
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w.data(),
+                length, out.data(), needed, nullptr, nullptr) != needed)
+            return {};
         return out;
     }
 

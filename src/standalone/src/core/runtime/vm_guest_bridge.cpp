@@ -15,6 +15,7 @@
 #include <exception>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -31,19 +32,25 @@ std::atomic<uint64_t> g_request_seq{1};
 
 std::string narrow_utf8(const std::wstring& text) {
 	if (text.empty()) return {};
-	int needed = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0, nullptr, nullptr);
+	if (text.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) return {};
+	const int length = static_cast<int>(text.size());
+	int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), length, nullptr, 0, nullptr, nullptr);
 	if (needed <= 0) return {};
 	std::string out(static_cast<size_t>(needed), '\0');
-	WideCharToMultiByte(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), out.data(), needed, nullptr, nullptr);
+	if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.data(), length, out.data(), needed, nullptr, nullptr) != needed)
+		return {};
 	return out;
 }
 
 std::wstring widen_utf8(const std::string& text) {
 	if (text.empty()) return {};
-	int needed = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0);
+	if (text.size() > static_cast<size_t>((std::numeric_limits<int>::max)())) return {};
+	const int length = static_cast<int>(text.size());
+	int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), length, nullptr, 0);
 	if (needed <= 0) return {};
 	std::wstring out(static_cast<size_t>(needed), L'\0');
-	MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), out.data(), needed);
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), length, out.data(), needed) != needed)
+		return {};
 	return out;
 }
 

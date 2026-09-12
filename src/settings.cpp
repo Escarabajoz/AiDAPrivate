@@ -1,5 +1,8 @@
 #include "aida_pro.hpp"
 
+#include <cmath>
+#include <limits>
+
 #ifdef __NT__
 #include <windows.h>
 #include <wincrypt.h>
@@ -360,6 +363,50 @@ static void to_json(nlohmann::json& j, const settings_t& s)
     };
 }
 
+static int safe_json_int(const nlohmann::json& j, const char* key, int fallback)
+{
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null())
+        return fallback;
+    if (it->is_number_integer())
+    {
+        const std::int64_t v = it->get<std::int64_t>();
+        if (v >= (std::numeric_limits<int>::min)() && v <= (std::numeric_limits<int>::max)())
+            return static_cast<int>(v);
+        return fallback;
+    }
+    if (it->is_number_unsigned())
+    {
+        const std::uint64_t v = it->get<std::uint64_t>();
+        if (v <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+            return static_cast<int>(v);
+        return fallback;
+    }
+    if (it->is_number_float())
+    {
+        const double v = it->get<double>();
+        if (std::isfinite(v) && v >= (std::numeric_limits<int>::min)() && v <= (std::numeric_limits<int>::max)())
+            return static_cast<int>(v);
+        return fallback;
+    }
+    return fallback;
+}
+
+static double safe_json_double(const nlohmann::json& j, const char* key, double fallback)
+{
+    auto it = j.find(key);
+    if (it == j.end() || it->is_null())
+        return fallback;
+    if (it->is_number_float() || it->is_number_integer() || it->is_number_unsigned())
+    {
+        const double v = it->get<double>();
+        if (std::isfinite(v))
+            return v;
+        return fallback;
+    }
+    return fallback;
+}
+
 static void from_json(const nlohmann::json& j, settings_t& s)
 {
     settings_t d;
@@ -386,29 +433,29 @@ static void from_json(const nlohmann::json& j, settings_t& s)
     s.local_llm_base_url = get_trimmed_json_string(j, "local_llm_base_url", d.local_llm_base_url);
     s.local_llm_model_name = j.value("local_llm_model_name", d.local_llm_model_name);
     s.local_llm_api_key = get_trimmed_key_string(j, "local_llm_api_key", d.local_llm_api_key);
-    s.local_llm_context_window = j.value("local_llm_context_window", d.local_llm_context_window);
+    s.local_llm_context_window = safe_json_int(j, "local_llm_context_window", d.local_llm_context_window);
 
-    s.xref_context_count = j.value("xref_context_count", d.xref_context_count);
-    s.xref_analysis_depth = j.value("xref_analysis_depth", d.xref_analysis_depth);
-    s.xref_code_snippet_lines = j.value("xref_code_snippet_lines", d.xref_code_snippet_lines);
+    s.xref_context_count = safe_json_int(j, "xref_context_count", d.xref_context_count);
+    s.xref_analysis_depth = safe_json_int(j, "xref_analysis_depth", d.xref_analysis_depth);
+    s.xref_code_snippet_lines = safe_json_int(j, "xref_code_snippet_lines", d.xref_code_snippet_lines);
 
-    s.bulk_processing_delay = j.value("bulk_processing_delay", d.bulk_processing_delay);
+    s.bulk_processing_delay = safe_json_double(j, "bulk_processing_delay", d.bulk_processing_delay);
 
-    s.max_root_func_scan_count = j.value("max_root_func_scan_count", d.max_root_func_scan_count);
-    s.max_root_func_candidates = j.value("max_root_func_candidates", d.max_root_func_candidates);
+    s.max_root_func_scan_count = safe_json_int(j, "max_root_func_scan_count", d.max_root_func_scan_count);
+    s.max_root_func_candidates = safe_json_int(j, "max_root_func_candidates", d.max_root_func_candidates);
 
-    s.temperature = j.value("temperature", d.temperature);
+    s.temperature = safe_json_double(j, "temperature", d.temperature);
     s.check_for_updates = j.value("check_for_updates", d.check_for_updates);
 
     s.mcp_enabled = j.value("mcp_enabled", d.mcp_enabled);
-    s.mcp_port = j.value("mcp_port", d.mcp_port);
+    s.mcp_port = safe_json_int(j, "mcp_port", d.mcp_port);
 
     s.embedding_enabled = j.value("embedding_enabled", d.embedding_enabled);
     s.embedding_api_url = get_trimmed_json_string(j, "embedding_api_url", d.embedding_api_url);
     s.embedding_api_key = get_trimmed_key_string(j, "embedding_api_key", d.embedding_api_key);
     s.embedding_model_name = j.value("embedding_model_name", d.embedding_model_name);
-    s.embedding_dimensions = j.value("embedding_dimensions", d.embedding_dimensions);
-    s.embedding_batch_size = j.value("embedding_batch_size", d.embedding_batch_size);
+    s.embedding_dimensions = safe_json_int(j, "embedding_dimensions", d.embedding_dimensions);
+    s.embedding_batch_size = safe_json_int(j, "embedding_batch_size", d.embedding_batch_size);
 
     if (j.contains("custom_prompts"))
         j.at("custom_prompts").get_to(s.custom_prompts);

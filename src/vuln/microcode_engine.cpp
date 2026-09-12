@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -606,7 +607,9 @@ bool parse_bool_param(const nlohmann::json& params, const char* key, bool def)
     if (v.is_boolean())
         return v.get<bool>();
     if (v.is_number_integer())
-        return v.get<int>() != 0;
+        return v.get<std::int64_t>() != 0;
+    if (v.is_number_unsigned())
+        return v.get<std::uint64_t>() != 0;
     if (v.is_string())
     {
         const std::string lower = ascii_lower(v.get<std::string>());
@@ -1493,18 +1496,31 @@ int int_param(const nlohmann::json& params, const char* key, int def, int min_v,
     {
         const auto& raw = params.at(key);
         if (raw.is_number_integer())
-            v = raw.get<int>();
+        {
+            const std::int64_t value = raw.get<std::int64_t>();
+            if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                v = static_cast<int>(value);
+        }
         else if (raw.is_number_unsigned())
-            v = static_cast<int>(raw.get<uint64_t>());
+        {
+            const std::uint64_t value = raw.get<std::uint64_t>();
+            if (value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                v = static_cast<int>(value);
+        }
         else if (raw.is_number_float())
-            v = static_cast<int>(raw.get<double>());
+        {
+            const double value = raw.get<double>();
+            if (std::isfinite(value) && value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+                v = static_cast<int>(value);
+        }
         else if (raw.is_string())
         {
             char* endp = nullptr;
             const std::string s = raw.get<std::string>();
             const char* cstr = s.c_str();
             long parsed = std::strtol(cstr, &endp, 0);
-            if (endp != nullptr && endp != cstr)
+            if (endp != nullptr && endp != cstr
+                && parsed >= (std::numeric_limits<int>::min)() && parsed <= (std::numeric_limits<int>::max)())
                 v = static_cast<int>(parsed);
         }
     }
@@ -1523,9 +1539,19 @@ int64_t int64_param(const nlohmann::json& params, const char* key, int64_t def)
     if (raw.is_number_integer())
         return raw.get<int64_t>();
     if (raw.is_number_unsigned())
-        return static_cast<int64_t>(raw.get<uint64_t>());
+    {
+        const std::uint64_t value = raw.get<std::uint64_t>();
+        if (value > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()))
+            return def;
+        return static_cast<int64_t>(value);
+    }
     if (raw.is_number_float())
-        return static_cast<int64_t>(raw.get<double>());
+    {
+        const double value = raw.get<double>();
+        if (!std::isfinite(value) || value < static_cast<double>((std::numeric_limits<std::int64_t>::min)()) || value > static_cast<double>((std::numeric_limits<std::int64_t>::max)()))
+            return def;
+        return static_cast<int64_t>(value);
+    }
     if (raw.is_string())
     {
         const std::string s = raw.get<std::string>();

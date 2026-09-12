@@ -4085,15 +4085,24 @@ bool client_t::launch_stdio_process()
 
     HANDLE stdin_read  = nullptr, stdin_write  = nullptr;
     HANDLE stdout_read = nullptr, stdout_write = nullptr;
+    struct pipe_guard_t {
+        HANDLE& a; HANDLE& b; HANDLE& c; HANDLE& d;
+        bool dismissed = false;
+        ~pipe_guard_t() noexcept {
+            if (dismissed) return;
+            if (a) ::CloseHandle(a);
+            if (b) ::CloseHandle(b);
+            if (c) ::CloseHandle(c);
+            if (d) ::CloseHandle(d);
+        }
+        void dismiss_kept() noexcept { dismissed = true; }
+        void dismiss_all() noexcept { a = b = c = d = nullptr; dismissed = true; }
+    } pipe_guard{stdin_read, stdin_write, stdout_read, stdout_write};
 
     if (!CreatePipe(&stdin_read, &stdin_write, &sa, 0) ||
         !CreatePipe(&stdout_read, &stdout_write, &sa, 0))
     {
         _last_error = "Failed to create pipes for stdio transport";
-        if (stdin_read)   CloseHandle(stdin_read);
-        if (stdin_write)  CloseHandle(stdin_write);
-        if (stdout_read)  CloseHandle(stdout_read);
-        if (stdout_write) CloseHandle(stdout_write);
         return false;
     }
 
@@ -4118,10 +4127,6 @@ bool client_t::launch_stdio_process()
             static_cast<int>(cmdline.size()), nullptr, 0);
         if (wlen <= 0) {
             _last_error = "Failed to convert command line to UTF-16: " + cmdline;
-            CloseHandle(stdin_read);
-            CloseHandle(stdin_write);
-            CloseHandle(stdout_read);
-            CloseHandle(stdout_write);
             return false;
         }
         wcmdline.resize(static_cast<size_t>(wlen));
@@ -4141,21 +4146,19 @@ bool client_t::launch_stdio_process()
     );
 
 
-    CloseHandle(stdin_read);
-    CloseHandle(stdout_write);
+    ::CloseHandle(stdin_read); stdin_read = nullptr;
+    ::CloseHandle(stdout_write); stdout_write = nullptr;
 
     if (!created) {
         _last_error = "Failed to launch MCP server process: " + cmdline;
-        CloseHandle(stdin_write);
-        CloseHandle(stdout_read);
         return false;
     }
 
-    CloseHandle(pi.hThread);
+    ::CloseHandle(pi.hThread);
     _child_process  = pi.hProcess;
     _child_process_id = pi.dwProcessId;
-    _child_stdin_w  = stdin_write;
-    _child_stdout_r = stdout_read;
+    _child_stdin_w  = stdin_write; stdin_write = nullptr;
+    _child_stdout_r = stdout_read; stdout_read = nullptr;
 
 
     Sleep(200);

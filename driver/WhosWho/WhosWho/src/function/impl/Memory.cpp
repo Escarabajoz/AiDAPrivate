@@ -258,10 +258,25 @@ NTSTATUS functions::handle777e(p_physical_rw request) {
         return STATUS_ACCESS_DENIED;
     }
 
+    const UINT64 range_tail = static_cast<UINT64>(request->size - 1);
+    const ULONG_PTR buffer_addr = reinterpret_cast<ULONG_PTR>(request->buffer);
+    if (target_addr > 0xFFFFFFFFFFFFFFFFULL - range_tail || buffer_addr > (ULONG_PTR)0xFFFFFFFFFFFFFFFFULL - range_tail) {
+        WW_LOG("PHYS_RW_EXIT pid=%lu dtb=0x%llx va=0x%llx size=0x%llx should_write=%u status=0x%08X ret=0 reason=range_overflow elapsed_us=%llu",
+            (ULONG)request->pid,
+            request->dtb,
+            target_addr,
+            (UINT64)request->size,
+            request->shouldWrite ? 1u : 0u,
+            (ULONG)STATUS_INTEGER_OVERFLOW,
+            mem_guard::elapsed_us(start, freq));
+        return STATUS_INTEGER_OVERFLOW;
+    }
+
 
     const UINT64 process_dir_base = request->dtb;
     const UINT32 target_pid = request->pid;
     const BOOLEAN is_write = (request->shouldWrite != 0);
+    const KPROCESSOR_MODE requestor_mode = ExGetPreviousMode();
 
     const BOOLEAN softfault_eligible =
         (!is_write) &&
@@ -339,12 +354,33 @@ NTSTATUS functions::handle777e(p_physical_rw request) {
                 }
             }
             else {
-                operation_status = strong::read_physical(
-                    physical_address,
-                    (PVOID)((ULONG_PTR)request->buffer + current_offset),
-                    transfer_size,
-                    &bytes_transferred
-                );
+                if (!km_staging) {
+                    km_staging = ExAllocatePool2(POOL_FLAG_NON_PAGED, 0x1000, 'sFwW');
+                }
+                if (!km_staging) {
+                    operation_status = STATUS_INSUFFICIENT_RESOURCES;
+                }
+                else {
+                    operation_status = strong::read_physical(
+                        physical_address,
+                        km_staging,
+                        transfer_size,
+                        &bytes_transferred
+                    );
+                    if (NT_SUCCESS(operation_status) && bytes_transferred > 0) {
+                        __try {
+                            PVOID destination = reinterpret_cast<PVOID>(buffer_addr + current_offset);
+                            if (requestor_mode == UserMode) {
+                                ProbeForWrite(destination, bytes_transferred, 1);
+                            }
+                            strong::kmemcpy(destination, km_staging, bytes_transferred);
+                        }
+                        __except (EXCEPTION_EXECUTE_HANDLER) {
+                            operation_status = static_cast<NTSTATUS>(GetExceptionCode());
+                            bytes_transferred = 0;
+                        }
+                    }
+                }
             }
 
             WW_LOG("PHYS_RW_CHUNK pid=%lu dtb=0x%llx va=0x%llx pa=0x%llx requested=0x%llx should_write=%u status=0x%08X bytes=0x%llx total_before=0x%llx remaining_before=0x%llx elapsed_us=%llu",
@@ -429,8 +465,12 @@ NTSTATUS functions::handle777e(p_physical_rw request) {
 
                     if (read_ok && bytes_staged > 0) {
                         __try {
+                            PVOID destination = reinterpret_cast<PVOID>(buffer_addr + current_offset);
+                            if (requestor_mode == UserMode) {
+                                ProbeForWrite(destination, bytes_staged, 1);
+                            }
                             strong::kmemcpy(
-                                (PVOID)((ULONG_PTR)request->buffer + current_offset),
+                                destination,
                                 km_staging,
                                 bytes_staged
                             );
@@ -478,7 +518,11 @@ NTSTATUS functions::handle777e(p_physical_rw request) {
         }
 
         __try {
-            strong::kmemset((PVOID)((ULONG_PTR)request->buffer + current_offset), 0, transfer_size);
+            PVOID destination = reinterpret_cast<PVOID>(buffer_addr + current_offset);
+            if (requestor_mode == UserMode) {
+                ProbeForWrite(destination, transfer_size, 1);
+            }
+            strong::kmemset(destination, 0, transfer_size);
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             break;
         }

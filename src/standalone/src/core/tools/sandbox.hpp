@@ -88,11 +88,15 @@ namespace sandbox
         {
             if (text.empty())
                 return {};
-            int needed = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
-            if (needed <= 0)
+            int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.c_str(), -1,
+                                             nullptr, 0, nullptr, nullptr);
+            if (needed <= 1)
                 return {};
-            std::string out(static_cast<size_t>(needed - 1), '\0');
-            WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, out.data(), needed, nullptr, nullptr);
+            std::string out(static_cast<size_t>(needed), '\0');
+            if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text.c_str(), -1, out.data(),
+                                    needed, nullptr, nullptr) != needed)
+                return {};
+            out.resize(static_cast<size_t>(needed - 1));
             return out;
         }
 

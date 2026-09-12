@@ -200,8 +200,13 @@ inline std::string get_downloads_folder()
     if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &known_path)) && known_path) {
         const int needed = WideCharToMultiByte(CP_UTF8, 0, known_path, -1, nullptr, 0, nullptr, nullptr);
         if (needed > 1) {
-            std::string out(static_cast<size_t>(needed - 1), '\0');
-            WideCharToMultiByte(CP_UTF8, 0, known_path, -1, out.data(), needed, nullptr, nullptr);
+            std::string out(static_cast<size_t>(needed), '\0');
+            int written = WideCharToMultiByte(CP_UTF8, 0, known_path, -1, out.data(), needed, nullptr, nullptr);
+            if (written <= 0) {
+                CoTaskMemFree(known_path);
+                return std::string();
+            }
+            out.resize(static_cast<size_t>(written - 1));
             CoTaskMemFree(known_path);
             out.push_back('\\');
             return out;

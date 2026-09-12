@@ -617,8 +617,11 @@ static tool_result_t burp_intruder_start(const json& params)
         return tool_result_t::error("host required");
     }
     cfg.host = params["host"].get<std::string>();
-    if (params.contains("port") && params["port"].is_number_integer()) {
-        cfg.port = static_cast<uint16_t>(params["port"].get<int>());
+    if (params.contains("port")) {
+        if (!params["port"].is_number_integer()) return tool_result_t::error("port must be an integer in 1..65535");
+        long long v = params["port"].get<long long>();
+        if (v < 1 || v > 65535) return tool_result_t::error("port must be in 1..65535");
+        cfg.port = static_cast<uint16_t>(v);
     } else {
         cfg.port = 443;
     }
@@ -643,8 +646,11 @@ static tool_result_t burp_intruder_start(const json& params)
     if (params.contains("positions") && params["positions"].is_array()) {
         for (auto& it : params["positions"]) {
             if (!it.is_array() || it.size() < 2) continue;
+            if (!it[0].is_number_unsigned() || !it[1].is_number_unsigned()) continue;
             size_t off = it[0].get<size_t>();
             size_t len = it[1].get<size_t>();
+            if (len == 0 || len > 8192) continue;
+            if (off > 10000000) continue;
             cfg.positions.push_back({ off, len });
         }
     }

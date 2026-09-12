@@ -13,6 +13,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <random>
 #include <set>
@@ -70,7 +71,9 @@ namespace agent {
 		{
 			std::error_code ec;
 			if (std::filesystem::exists(dir, ec))
-				return true;
+				return std::filesystem::is_directory(dir, ec);
+			if (ec)
+				return false;
 			ec.clear();
 			std::filesystem::create_directories(dir, ec);
 			if (ec) {
@@ -83,6 +86,16 @@ namespace agent {
 		constexpr std::size_t k_max_custom_agents = 256;
 		constexpr std::size_t k_max_catalog_bytes = 16ULL * 1024ULL * 1024ULL;
 		constexpr std::size_t k_max_options_bytes = 1024ULL * 1024ULL;
+
+		struct file_handle_closer_t {
+			void operator()(void* value) const noexcept
+			{
+				if (value && value != INVALID_HANDLE_VALUE)
+					CloseHandle(static_cast<HANDLE>(value));
+			}
+		};
+
+		using file_handle_t = std::unique_ptr<void, file_handle_closer_t>;
 
 		std::filesystem::path catalog_path()
 		{
@@ -171,9 +184,9 @@ namespace agent {
 			temporary = destination;
 			temporary += L".tmp-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
 				std::to_wstring(GetTickCount64());
-			HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
-				CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-			if (file == INVALID_HANDLE_VALUE) {
+			file_handle_t file(reinterpret_cast<void*>(CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+				CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr)));
+			if (!file) {
 				error = "Custom agent staging file could not be created";
 				return false;
 			}
@@ -183,7 +196,7 @@ namespace agent {
 				const DWORD chunk = static_cast<DWORD>((std::min)(
 					payload.size() - offset, static_cast<std::size_t>(1024 * 1024)));
 				DWORD written = 0;
-				if (!WriteFile(file, payload.data() + offset, chunk, &written, nullptr) ||
+				if (!WriteFile(static_cast<HANDLE>(file.get()), payload.data() + offset, chunk, &written, nullptr) ||
 					written != chunk) {
 					ok = false;
 					break;
@@ -191,9 +204,12 @@ namespace agent {
 				offset += written;
 			}
 			LARGE_INTEGER size{};
-			if (ok && (!FlushFileBuffers(file) || !GetFileSizeEx(file, &size) ||
+			if (ok && (!FlushFileBuffers(static_cast<HANDLE>(file.get())) || !GetFileSizeEx(static_cast<HANDLE>(file.get()), &size) ||
 				static_cast<std::uint64_t>(size.QuadPart) != payload.size())) ok = false;
-			CloseHandle(file);
+			if (CloseHandle(static_cast<HANDLE>(file.get())))
+				file.release();
+			else
+				ok = false;
 			if (!ok) {
 				DeleteFileW(temporary.c_str());
 				error = "Custom agent catalog staging write was incomplete";

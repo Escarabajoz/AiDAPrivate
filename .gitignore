@@ -86,6 +86,10 @@ models.json
 **/aidalogo.c
 **/background.c
 
+# Allow required Qt resource images (blocked by *.png above, but needed for qrc)
+!/src/standalone/resources/img/aidalogo.png
+!/src/standalone/resources/img/background.webp
+
 # Excluded Project Roots
 /bot/
 /firebase/

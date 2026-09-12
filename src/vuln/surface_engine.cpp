@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -449,11 +450,26 @@ int extract_int_param(const json& params, const std::string& key, int default_va
     try
     {
         if (it->is_number_integer())
-            return it->get<int>();
+        {
+            const std::int64_t value = it->get<std::int64_t>();
+            if (value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_number_unsigned())
-            return static_cast<int>(it->get<std::uint64_t>());
+        {
+            const std::uint64_t value = it->get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_number())
-            return static_cast<int>(it->get<double>());
+        {
+            const double value = it->get<double>();
+            if (!std::isfinite(value) || value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return default_value;
+            return static_cast<int>(value);
+        }
         if (it->is_string())
         {
             const std::string s = it->get<std::string>();
@@ -1988,7 +2004,9 @@ bool json_bool_param_surface(const json& params, const char* key, bool fallback)
     if (it->is_boolean())
         return it->get<bool>();
     if (it->is_number_integer())
-        return it->get<int>() != 0;
+        return it->get<std::int64_t>() != 0;
+    if (it->is_number_unsigned())
+        return it->get<std::uint64_t>() != 0;
     return fallback;
 }
 
@@ -2002,11 +2020,26 @@ int json_int_param_surface(const json& params, const char* key, int fallback)
     try
     {
         if (it->is_number_integer())
-            return it->get<int>();
+        {
+            const std::int64_t value = it->get<std::int64_t>();
+            if (value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return fallback;
+            return static_cast<int>(value);
+        }
         if (it->is_number_unsigned())
-            return static_cast<int>(it->get<std::uint64_t>());
+        {
+            const std::uint64_t value = it->get<std::uint64_t>();
+            if (value > static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+                return fallback;
+            return static_cast<int>(value);
+        }
         if (it->is_number())
-            return static_cast<int>(it->get<double>());
+        {
+            const double value = it->get<double>();
+            if (!std::isfinite(value) || value < (std::numeric_limits<int>::min)() || value > (std::numeric_limits<int>::max)())
+                return fallback;
+            return static_cast<int>(value);
+        }
         if (it->is_string())
             return std::stoi(it->get<std::string>());
     }

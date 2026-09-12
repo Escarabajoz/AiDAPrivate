@@ -32,14 +32,14 @@ void clear_menu(QMenu* menu) {
         if (!child)
             continue;
         child->setParent(nullptr);
-        delete child;
+        child->deleteLater();
     }
     const auto child_menus = menu->findChildren<QMenu*>(QString(), Qt::FindDirectChildrenOnly);
     for (QMenu* child : child_menus) {
         if (!child)
             continue;
         child->setParent(nullptr);
-        delete child;
+        child->deleteLater();
     }
 }
 

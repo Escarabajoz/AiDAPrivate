@@ -6,6 +6,7 @@
 #endif
 
 #include <algorithm>
+#include <limits>
 #include <queue>
 #include <deque>
 #include <chrono>
@@ -772,7 +773,15 @@ static json build_mcp_tool_result_payload(const agent_tools::tool_result_t& tool
 
     result["content"] = content;
     if (!tool_result.success)
+    {
         result["isError"] = true;
+        if (!tool_result.error_code.empty())
+        {
+            if (!result.contains("structuredContent") || !result["structuredContent"].is_object())
+                result["structuredContent"] = json::object();
+            result["structuredContent"]["error_code"] = tool_result.error_code;
+        }
+    }
     return result;
 }
 
@@ -2424,6 +2433,9 @@ static json handle_tools_call(const json& id, const json& params)
     if (!params.contains("name") || !params["name"].is_string())
         return make_jsonrpc_error(id, JSONRPC_INVALID_PARAMS, "Missing required field: 'name'");
 
+    if (params.contains("arguments") && !params["arguments"].is_object())
+        return make_jsonrpc_error(id, JSONRPC_INVALID_PARAMS, "Field 'arguments' must be an object");
+
     std::string tool_name = params["name"].get<std::string>();
     json arguments = params.contains("arguments") && params["arguments"].is_object()
                    ? params["arguments"]
@@ -2483,6 +2495,9 @@ static json handle_resources_read(const json& id, const json& params)
         return make_jsonrpc_error(id, JSONRPC_INVALID_PARAMS, "Unknown resource URI: " + uri);
 
     auto tool_result = execute_resource_read(found);
+    if (!tool_result.success)
+        return make_jsonrpc_error(id, JSONRPC_INTERNAL_ERROR,
+            tool_result.output.empty() ? "Resource read failed" : sanitize_utf8(tool_result.output));
 
     std::string text_content;
     if (!tool_result.data.is_null() && !tool_result.data.empty())
@@ -2863,13 +2878,23 @@ static json dispatch_single_message(const json& msg)
     if (!msg.is_object())
         return make_jsonrpc_error(nullptr, JSONRPC_INVALID_REQUEST, std::string("Request must be a JSON object"));
 
-    std::string method = msg.value("method", "");
-    if (method.empty())
+    if (!msg.contains("jsonrpc") || !msg["jsonrpc"].is_string() || msg["jsonrpc"].get<std::string>() != "2.0")
+        return make_jsonrpc_error(msg.contains("id") ? msg["id"] : json(nullptr), JSONRPC_INVALID_REQUEST,
+            std::string("Missing or invalid 'jsonrpc' field"));
+
+    if (msg.contains("id") && !(msg["id"].is_string() || msg["id"].is_number() || msg["id"].is_null()))
+        return make_jsonrpc_error(nullptr, JSONRPC_INVALID_REQUEST, std::string("Invalid 'id' field"));
+
+    if (!msg.contains("method") || !msg["method"].is_string() || msg["method"].get_ref<const std::string&>().empty())
         return make_jsonrpc_error(msg.value("id", json(nullptr)), JSONRPC_INVALID_REQUEST, std::string("Missing 'method' field"));
+    std::string method = msg["method"].get<std::string>();
 
     json id = msg.contains("id") ? msg["id"] : json(nullptr);
     json params = msg.value("params", json::object());
     bool is_notification = !msg.contains("id");
+
+    if (!params.is_object())
+        return make_jsonrpc_error(id, JSONRPC_INVALID_PARAMS, std::string("'params' must be an object"));
 
     if (method == "initialize")
         return handle_initialize(id, params);
@@ -2913,6 +2938,34 @@ static json dispatch_single_message(const json& msg)
     return make_jsonrpc_error(id, JSONRPC_METHOD_NOT_FOUND, std::string("Unknown method: ") + method);
 }
 
+static json dispatch_single_message_noexcept(const json& msg)
+{
+    try
+    {
+        return dispatch_single_message(msg);
+    }
+    catch (const std::exception& e)
+    {
+        const json id = msg.is_object() && msg.contains("id") ? msg["id"] : json(nullptr);
+        aida_ipc::trace_breadcrumb("ida_mcp_dispatch_exception what=%s", e.what());
+        return make_jsonrpc_error(id, JSONRPC_INTERNAL_ERROR, "Internal error");
+    }
+    catch (...)
+    {
+        const json id = msg.is_object() && msg.contains("id") ? msg["id"] : json(nullptr);
+        aida_ipc::trace_breadcrumb("ida_mcp_dispatch_exception non_std=1");
+        return make_jsonrpc_error(id, JSONRPC_INTERNAL_ERROR, "Internal error");
+    }
+}
+
+static bool is_jsonrpc_notification(const json& msg)
+{
+    return msg.is_object() && !msg.contains("id")
+        && msg.contains("jsonrpc") && msg["jsonrpc"].is_string()
+        && msg["jsonrpc"].get_ref<const std::string&>() == "2.0"
+        && msg.contains("method") && msg["method"].is_string();
+}
+
 static std::string handle_mcp_body(const std::string& body)
 {
 #ifdef __NT__
@@ -2937,8 +2990,8 @@ static std::string handle_mcp_body(const std::string& body)
         json responses = json::array();
         for (const auto& item : parsed)
         {
-            json response = dispatch_single_message(item);
-            if (!response.is_null())
+            json response = dispatch_single_message_noexcept(item);
+            if (!response.is_null() && !is_jsonrpc_notification(item))
                 responses.push_back(response);
         }
 
@@ -2947,7 +3000,9 @@ static std::string handle_mcp_body(const std::string& body)
         return json_dump_safe(responses);
     }
 
-    json response = dispatch_single_message(parsed);
+    json response = dispatch_single_message_noexcept(parsed);
+    if (is_jsonrpc_notification(parsed))
+        return "";
     if (response.is_null())
         return "";
     return json_dump_safe(response);
@@ -3039,9 +3094,23 @@ static agent_tools::tool_result_t aggregator_query_all(const json& params)
     int timeout_seconds = 60;
     if (params.contains("timeout_seconds") && params["timeout_seconds"].is_number_integer())
     {
-        int t = params["timeout_seconds"].get<int>();
-        if (t > 0 && t < 3600)
-            timeout_seconds = t;
+        const std::int64_t value = params["timeout_seconds"].get<std::int64_t>();
+        if (value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)())
+        {
+            const int t = static_cast<int>(value);
+            if (t > 0 && t < 3600)
+                timeout_seconds = t;
+        }
+    }
+    else if (params.contains("timeout_seconds") && params["timeout_seconds"].is_number_unsigned())
+    {
+        const std::uint64_t value = params["timeout_seconds"].get<std::uint64_t>();
+        if (value <= static_cast<std::uint64_t>(3600) && value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)()))
+        {
+            const int t = static_cast<int>(value);
+            if (t > 0 && t < 3600)
+                timeout_seconds = t;
+        }
     }
 
     const auto* tool_def = agent_tools::ToolRegistry::instance().get_tool(tool_name);
@@ -3265,7 +3334,7 @@ mcp_server_t::~mcp_server_t()
 {
 #ifdef __NT__
     aida_ipc::trace_breadcrumb("ida_mcp_dtor_enter running=%d port=%d",
-                               _running.load() ? 1 : 0, _port);
+                               _running.load() ? 1 : 0, _port.load());
 #endif
     stop();
 #ifdef __NT__
@@ -3277,14 +3346,14 @@ bool mcp_server_t::is_running() const
 {
 #ifdef __NT__
     aida_ipc::trace_breadcrumb("ida_mcp_is_running running=%d port=%d",
-                               _running.load() ? 1 : 0, _port);
+                               _running.load() ? 1 : 0, _port.load());
 #endif
     return _running.load();
 }
 
 int mcp_server_t::get_port() const
 {
-    int p = _running.load() ? _port : 0;
+    int p = _running.load() ? _port.load() : 0;
 #ifdef __NT__
     aida_ipc::trace_breadcrumb("ida_mcp_get_port running=%d port=%d", _running.load() ? 1 : 0, p);
 #endif
@@ -3301,8 +3370,18 @@ bool mcp_server_t::start(int port)
 
     if (_running.load())
     {
-        msg("AiDA MCP: Server is already running on port %d.\n", _port);
+        msg("AiDA MCP: Server is already running on port %d.\n", _port.load());
         return true;
+    }
+
+    if (_server_thread.joinable())
+    {
+        if (!_thread_finished.load(std::memory_order_acquire))
+        {
+            msg("AiDA MCP: Server startup is already in progress.\n");
+            return true;
+        }
+        _server_thread.join();
     }
 
     register_aggregator_tools_once();
@@ -3326,6 +3405,7 @@ bool mcp_server_t::start(int port)
 #ifdef __NT__
         aida_ipc::trace_breadcrumb("ida_mcp_start_spawning_thread port=%d", port);
 #endif
+        _thread_finished.store(false, std::memory_order_release);
         _server_thread = std::thread([this, port]() { server_thread_entry(port); });
     }
     catch (const std::exception& e)
@@ -3334,6 +3414,7 @@ bool mcp_server_t::start(int port)
 #ifdef __NT__
         aida_ipc::trace_breadcrumb("ida_mcp_start_thread_exception port=%d what=%s", port, e.what());
 #endif
+        _thread_finished.store(true, std::memory_order_release);
         return false;
     }
 #ifdef __NT__
@@ -3347,39 +3428,40 @@ bool mcp_server_t::start(int port)
     {
         size_t tool_count = agent_tools::ToolRegistry::instance().get_tool_names().size();
 #ifdef __NT__
-        aida_ipc::trace_breadcrumb("ida_mcp_start_running port=%d tool_count=%zu", _port, tool_count);
+        aida_ipc::trace_breadcrumb("ida_mcp_start_running port=%d tool_count=%zu", _port.load(), tool_count);
 #endif
 
-        std::string base_url = "http://127.0.0.1:" + std::to_string(_port);
+        const int bound_port = _port.load();
+        std::string base_url = "http://127.0.0.1:" + std::to_string(bound_port);
         std::string mcp_url  = base_url + "/mcp";
         std::string sse_url  = base_url + "/sse";
 
         if (!_registry)
             _registry = std::make_unique<instance_registry_t>();
 #ifdef __NT__
-        aida_ipc::trace_breadcrumb("ida_mcp_start_registry_start port=%d base_url=%s", _port, base_url.c_str());
+        aida_ipc::trace_breadcrumb("ida_mcp_start_registry_start port=%d base_url=%s", bound_port, base_url.c_str());
 #endif
-        if (_registry->start(_port, base_url, mcp_url, sse_url))
+        if (_registry->start(bound_port, base_url, mcp_url, sse_url))
         {
             g_active_registry.store(_registry.get(), std::memory_order_release);
             _registry->on_peer_set_changed([this]() {
                 this->write_mcp_client_configs();
             });
 #ifdef __NT__
-            aida_ipc::trace_breadcrumb("ida_mcp_start_registry_ok port=%d", _port);
+            aida_ipc::trace_breadcrumb("ida_mcp_start_registry_ok port=%d", bound_port);
 #endif
         }
         else
         {
             msg("AiDA MCP: Warning - instance registry failed to start; multi-instance discovery disabled.\n");
 #ifdef __NT__
-            aida_ipc::trace_breadcrumb("ida_mcp_start_registry_fail port=%d", _port);
+            aida_ipc::trace_breadcrumb("ida_mcp_start_registry_fail port=%d", bound_port);
 #endif
         }
 
-        msg("AiDA MCP: Server started on http://127.0.0.1:%d\n", _port);
-        if (port > 0 && _port != port)
-            msg("AiDA MCP: Requested port %d was in use; bound to port %d instead.\n", port, _port);
+        msg("AiDA MCP: Server started on http://127.0.0.1:%d\n", bound_port);
+        if (port > 0 && bound_port != port)
+            msg("AiDA MCP: Requested port %d was in use; bound to port %d instead.\n", port, bound_port);
         msg("AiDA MCP: %zu tools available.\n", tool_count);
         msg("AiDA MCP: Streamable HTTP  -> %s\n", mcp_url.c_str());
         msg("AiDA MCP: Legacy SSE       -> %s\n", sse_url.c_str());
@@ -3417,7 +3499,7 @@ void mcp_server_t::stop()
     aida_ipc::trace_breadcrumb("ida_mcp_stop_enter running=%d joinable=%d port=%d",
                                _running.load() ? 1 : 0,
                                _server_thread.joinable() ? 1 : 0,
-                               _port);
+                               _port.load());
 #endif
     if (!_running.load() && !_server_thread.joinable() && !_registry)
     {
@@ -3431,7 +3513,7 @@ void mcp_server_t::stop()
     aida_ipc::trace_breadcrumb("ida_mcp_stop_enter running=%d joinable=%d port=%d",
                                _running.load() ? 1 : 0,
                                _server_thread.joinable() ? 1 : 0,
-                               _port);
+                               _port.load());
 #endif
     _stop_requested = true;
 
@@ -3446,7 +3528,7 @@ void mcp_server_t::stop()
     if (_server_thread.joinable())
         _server_thread.join();
 #ifdef __NT__
-    aida_ipc::trace_breadcrumb("ida_mcp_stop_thread_joined port=%d", _port);
+    aida_ipc::trace_breadcrumb("ida_mcp_stop_thread_joined port=%d", _port.load());
 #endif
 
     if (_registry)
@@ -3488,7 +3570,7 @@ void mcp_server_t::server_thread_finish(unsigned long seh, int port)
         aida_ipc::trace_breadcrumb("ida_mcp_server_thread_seh code=0x%08lX requested_port=%d bound_port=%d",
                                    seh,
                                    port,
-                                   _port);
+                                   _port.load());
 #endif
         _bind_failed.store(true, std::memory_order_release);
     }
@@ -3497,11 +3579,12 @@ void mcp_server_t::server_thread_finish(unsigned long seh, int port)
         std::lock_guard<std::mutex> lock(_server_mutex);
         _active_server = nullptr;
     }
+    _thread_finished.store(true, std::memory_order_release);
 #ifdef __NT__
     aida_ipc::trace_breadcrumb("ida_mcp_server_thread_exit seh=0x%08lX requested_port=%d bound_port=%d",
                                seh,
                                port,
-                               _port);
+                               _port.load());
 #endif
 }
 
@@ -3669,8 +3752,16 @@ void mcp_server_t::server_thread_func(int port)
             return;
         }
 
-        std::string tool_name = body.value("name", "");
-        json arguments = body.value("arguments", json::object());
+        if (!body.is_object() || !body.contains("name") || !body["name"].is_string()
+            || (body.contains("arguments") && !body["arguments"].is_object()))
+        {
+            res.status = 400;
+            res.set_content(json_dump_safe({{"error", "Expected string 'name' and object 'arguments'"}}), "application/json");
+            return;
+        }
+
+        std::string tool_name = body["name"].get<std::string>();
+        json arguments = body.contains("arguments") ? body["arguments"] : json::object();
 
         if (tool_name.empty())
         {
@@ -3692,6 +3783,8 @@ void mcp_server_t::server_thread_func(int port)
         json resp;
         resp["success"] = tool_result.success;
         resp["output"] = sanitize_utf8(tool_result.output);
+        if (!tool_result.error_code.empty())
+            resp["error_code"] = tool_result.error_code;
         if (!tool_result.data.is_null() && !tool_result.data.empty())
             resp["data"] = tool_result.data;
 

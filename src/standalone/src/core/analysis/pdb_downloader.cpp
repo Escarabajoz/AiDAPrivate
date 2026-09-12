@@ -94,6 +94,16 @@ struct winhttp_handle_t {
 	explicit operator bool() const { return h != nullptr; }
 };
 
+struct file_handle_closer_t {
+    void operator()(void* value) const noexcept
+    {
+        if (value && value != INVALID_HANDLE_VALUE)
+            CloseHandle(static_cast<HANDLE>(value));
+    }
+};
+
+using file_handle_t = std::unique_ptr<void, file_handle_closer_t>;
+
 bool http_get_to_file(const std::string& url,
                       const std::filesystem::path& destination,
                       const progress_callback_t& on_progress,
@@ -213,11 +223,11 @@ bool http_get_to_file(const std::string& url,
 	std::error_code ec;
 	std::filesystem::create_directories(destination.parent_path(), ec);
 
-	HANDLE hf = CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr,
-		CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (hf == INVALID_HANDLE_VALUE) {
-		error = "CreateFileW err=" + std::to_string(GetLastError());
-		return false;
+    file_handle_t hf(reinterpret_cast<void*>(CreateFileW(destination.c_str(), GENERIC_WRITE, 0, nullptr,
+		CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr)));
+    if (!hf) {
+        error = "CreateFileW err=" + std::to_string(GetLastError());
+        return false;
 	}
 
 	bool ok = true;
@@ -249,7 +259,7 @@ bool http_get_to_file(const std::string& url,
 		}
 		if (read == 0) break;
 		DWORD written = 0;
-		if (!WriteFile(hf, chunk.data(), read, &written, nullptr) || written != read) {
+        if (!WriteFile(static_cast<HANDLE>(hf.get()), chunk.data(), read, &written, nullptr) || written != read) {
 			error = "WriteFile err=" + std::to_string(GetLastError());
 			ok = false;
 			break;
@@ -266,8 +276,7 @@ bool http_get_to_file(const std::string& url,
 		}
 	}
 
-	CloseHandle(hf);
-	out_bytes = total;
+    out_bytes = total;
 	if (ok) emit_progress(total);
 	if (!ok) {
 		std::filesystem::remove(destination, ec);
@@ -344,9 +353,18 @@ INT_PTR DIAMONDAPI fdi_notify(FDINOTIFICATIONTYPE fdint, PFDINOTIFICATION pfdin)
 {
 	if (fdint == fdintCOPY_FILE) {
 		auto* ctx = static_cast<fdi_ctx_t*>(pfdin->pv);
-		std::filesystem::path target = std::filesystem::path(ctx->target_dir) / pfdin->psz1;
+		const std::filesystem::path member_path(pfdin->psz1);
+		if (member_path.is_absolute() || member_path.has_root_name())
+			return -1;
+		for (const auto& component : member_path) {
+			if (component == L"..")
+				return -1;
+		}
+		std::filesystem::path target = std::filesystem::path(ctx->target_dir) / member_path;
 		std::error_code ec;
 		std::filesystem::create_directories(target.parent_path(), ec);
+		if (ec)
+			return -1;
 		HANDLE h = CreateFileA(target.string().c_str(), GENERIC_WRITE, 0, nullptr,
 			CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 		if (h == INVALID_HANDLE_VALUE) return -1;
@@ -532,6 +550,10 @@ bool download_pdb_sync(const download_request_t& req,
 	auto target = build_local_target(req);
 	std::error_code ec;
 	std::filesystem::create_directories(target.parent_path(), ec);
+	if (ec) {
+		out.error = "cache directory creation failed: " + ec.message();
+		return false;
+	}
 
 	std::string url = build_server_url(req.server_base, req.pdb_name,
 		req.pdb_guid, req.pdb_age, false);

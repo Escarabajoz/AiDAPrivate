@@ -4234,7 +4234,7 @@ void register_net_security_tools(mcp_standalone::server_t& srv) {
          {"port", "number", "TLS port, default 443.", false},
          {"timeout_ms", "number", "Per-probe timeout bounded by MCP deadline, capped at 15000.", false},
          {"check_chain", "boolean", "Validate certificate chain and hostname with Windows CryptoAPI cache-only revocation evidence.", false}},
-        true,
+        false,
         aida_tls_assess
     });
 
@@ -4244,7 +4244,7 @@ void register_net_security_tools(mcp_standalone::server_t& srv) {
         {{"host", "string", "TLS server hostname or address.", true},
          {"port", "number", "TLS port, default 443.", false},
          {"timeout_ms", "number", "Per-probe timeout bounded by MCP deadline, capped at 15000.", false}},
-        true,
+        false,
         aida_tls_jarm
     });
 

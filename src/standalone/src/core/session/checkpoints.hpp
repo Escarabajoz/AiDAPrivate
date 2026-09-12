@@ -1,5 +1,10 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
 #include <string>
 #include <vector>
 #include <map>
@@ -29,6 +34,24 @@ inline std::string& last_error_ref()
 inline void set_last_error(const std::string& msg)
 {
     last_error_ref() = msg;
+}
+
+inline bool safe_path_component(const std::string& value)
+{
+    return !value.empty() && value != "." && value != ".." &&
+           value.find_first_of("/\\:") == std::string::npos;
+}
+
+inline bool safe_relative_path(const std::filesystem::path& path)
+{
+    if (path.empty() || path.is_absolute() || path.has_root_name() || path.has_root_directory())
+        return false;
+    for (const auto& component : path) {
+        if (component.empty() || component == "." || component == ".." ||
+            component.native().find(L':') != std::wstring::npos)
+            return false;
+    }
+    return true;
 }
 }
 
@@ -76,6 +99,7 @@ inline bool write_file_atomic(const std::filesystem::path& dest, const char* dat
 {
     std::error_code ec;
     std::filesystem::create_directories(dest.parent_path(), ec);
+    if (ec) return false;
     auto tmp = dest;
     tmp += ".tmp";
     {
@@ -85,9 +109,8 @@ inline bool write_file_atomic(const std::filesystem::path& dest, const char* dat
         ofs.flush();
         if (!ofs) return false;
     }
-    std::filesystem::remove(dest, ec);
-    std::filesystem::rename(tmp, dest, ec);
-    if (ec) {
+    if (!MoveFileExW(tmp.c_str(), dest.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
         std::filesystem::remove(tmp, ec);
         return false;
     }
@@ -123,6 +146,8 @@ public:
     {
         std::lock_guard<std::mutex> lk(_mutex);
 
+        if (!detail::safe_path_component(task_id)) return false;
+
         checkpoint_t cp;
         cp.id = make_checkpoint_id();
         cp.task_id = task_id;
@@ -137,11 +162,16 @@ public:
         if (ec) return false;
 
         for (const auto& rel_path : tracked_files) {
-            auto full_path = std::filesystem::path(_workspace) / rel_path;
-            if (!std::filesystem::exists(full_path)) continue;
+            const std::filesystem::path relative(rel_path);
+            if (!detail::safe_relative_path(relative)) return false;
+            auto full_path = std::filesystem::path(_workspace) / relative;
+            ec.clear();
+            const bool exists = std::filesystem::exists(full_path, ec);
+            if (ec) return false;
+            if (!exists) continue;
 
             std::ifstream ifs(full_path, std::ios::binary);
-            if (!ifs) continue;
+            if (!ifs) return false;
 
             std::string content((std::istreambuf_iterator<char>(ifs)),
                                  std::istreambuf_iterator<char>());
@@ -152,7 +182,7 @@ public:
             snap.size = static_cast<int64_t>(content.size());
             cp.files.push_back(snap);
 
-            auto dest = std::filesystem::path(cp_dir) / rel_path;
+            auto dest = std::filesystem::path(cp_dir) / relative;
             if (!write_file_atomic(dest, content.data(), content.size())) {
                 return false;
             }
@@ -169,6 +199,9 @@ public:
     {
         std::lock_guard<std::mutex> lk(_mutex);
 
+        if (!detail::safe_path_component(task_id) ||
+            !detail::safe_path_component(checkpoint_id)) return false;
+
         auto cp_dir = checkpoint_dir(task_id, checkpoint_id);
         if (!std::filesystem::exists(cp_dir)) return false;
 
@@ -176,10 +209,14 @@ public:
         if (manifest.id.empty()) return false;
 
         for (const auto& snap : manifest.files) {
-            auto src = std::filesystem::path(cp_dir) / snap.relative_path;
-            auto dest = std::filesystem::path(_workspace) / snap.relative_path;
+            const std::filesystem::path relative(snap.relative_path);
+            if (!detail::safe_relative_path(relative)) return false;
+            auto src = std::filesystem::path(cp_dir) / relative;
+            auto dest = std::filesystem::path(_workspace) / relative;
 
-            if (!std::filesystem::exists(src)) continue;
+            std::error_code ec;
+            const bool exists = std::filesystem::exists(src, ec);
+            if (ec || !exists) return false;
 
             std::ifstream ifs(src, std::ios::binary);
             if (!ifs) return false;
@@ -252,6 +289,7 @@ public:
         std::lock_guard<std::mutex> lk(_mutex);
 
         std::vector<checkpoint_t> result;
+        if (!detail::safe_path_component(task_id)) return result;
         auto task_dir = std::filesystem::path(_storage) / task_id;
         if (std::filesystem::exists(task_dir)) {
             for (const auto& entry : std::filesystem::directory_iterator(task_dir)) {
@@ -286,6 +324,10 @@ public:
         std::lock_guard<std::mutex> lk(_mutex);
 
         std::vector<std::pair<std::string, std::string>> changes;
+
+        if (!detail::safe_path_component(task_id) ||
+            !detail::safe_path_component(cp_a) ||
+            !detail::safe_path_component(cp_b)) return changes;
 
         auto dir_a = checkpoint_dir(task_id, cp_a);
         auto dir_b = checkpoint_dir(task_id, cp_b);

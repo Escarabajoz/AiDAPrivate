@@ -4,6 +4,7 @@
 #include "../../src/core/mcp/protocol/mcp_tool_contract.hpp"
 
 #include <string_view>
+#include <utility>
 
 namespace aida::standalone::tests::mcp_compat {
 
@@ -89,6 +90,12 @@ bool run_protocol_core_harness(std::string& failure) {
     if (cache_runtime.compile(json{{"$ref", "https://invalid.example/schema.json"}}).valid ||
         cache_runtime.compile(json{{"$id", "https://invalid.example/schema.json"}, {"type", "object"}}).valid) {
         return reject("schema runtime accepted a remote schema reference or identifier");
+    }
+    schema_runtime_t moved_runtime(2);
+    schema_runtime_t moved_from_runtime(std::move(moved_runtime));
+    if (moved_runtime.validate(json{{"type", "object"}}, json::object()).valid ||
+        moved_runtime.cache_stats().entries != 0) {
+        return reject("moved-from schema runtime was not safely inert");
     }
 
     json upstream_payload = {{"value", 7}};

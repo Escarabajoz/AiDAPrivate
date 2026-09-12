@@ -31,10 +31,11 @@ private:
     std::atomic<bool> _running{false};
     std::atomic<bool> _stop_requested{false};
     std::atomic<bool> _bind_failed{false};
+    std::atomic<bool> _thread_finished{true};
 
     void* _active_server = nullptr;
     std::mutex _server_mutex;
-    int _port = 0;
+    std::atomic<int> _port{0};
 
     std::unique_ptr<instance_registry_t> _registry;
 };

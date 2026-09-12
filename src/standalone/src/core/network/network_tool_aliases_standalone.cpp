@@ -172,6 +172,21 @@ tool_result_t sanitize_result(tool_result_t result)
     return result;
 }
 
+json forwarded_args(const json& args)
+{
+    if (!args.is_object())
+        return json::object();
+    json out = args;
+    if (args.contains("payload") && args["payload"].is_object()) {
+        for (auto it = args["payload"].begin(); it != args["payload"].end(); ++it) {
+            if (!out.contains(it.key()))
+                out[it.key()] = it.value();
+        }
+        out.erase("payload");
+    }
+    return out;
+}
+
 std::vector<mcp_standalone::tool_param_t> passthrough_params()
 {
     return {
@@ -197,7 +212,7 @@ void register_direct_alias(mcp_standalone::server_t& srv,
             if (mcp_standalone::current_call_cancelled())
                 return tool_result_t::error(std::string(alias) + " cancelled before dispatch", std::string("cancelled"), json::object());
             diag::log_tagged_fmt("tool_alias", "dispatch alias=%s target=%s", alias, target);
-            return sanitize_result(srv.call_registered_tool(target, args, false));
+            return sanitize_result(srv.call_registered_tool(target, forwarded_args(args), false));
         }
     });
 }
@@ -224,7 +239,7 @@ void register_dispatch_alias(mcp_standalone::server_t& srv,
             for (const auto& target : targets) {
                 if (action == target.action) {
                     diag::log_tagged_fmt("tool_alias", "dispatch alias=%s action=%s target=%s", alias, action.c_str(), target.target);
-                    return sanitize_result(srv.call_registered_tool(target.target, args, false));
+                    return sanitize_result(srv.call_registered_tool(target.target, forwarded_args(args), false));
                 }
             }
             json detail;

@@ -1382,7 +1382,7 @@ public:
 
     ~mcp_job_runtime_t()
     {
-        shutdown(2000);
+        shutdown();
     }
 
     mcp_job_runtime_t(const mcp_job_runtime_t&) = delete;
@@ -1471,7 +1471,7 @@ public:
         });
     }
 
-    void shutdown(uint32_t join_timeout_ms)
+    void shutdown()
     {
         const bool already = stopping.exchange(true, std::memory_order_acq_rel);
         if (!already)
@@ -1481,18 +1481,7 @@ public:
         }
         cv.notify_all();
         if (worker.joinable())
-        {
-#ifdef _WIN32
-            HANDLE handle = static_cast<HANDLE>(worker.native_handle());
-            DWORD wait_rc = WaitForSingleObject(handle, join_timeout_ms);
-            if (wait_rc == WAIT_OBJECT_0)
-                worker.join();
-            else
-                worker.detach();
-#else
             worker.join();
-#endif
-        }
         gateway.stop();
     }
 

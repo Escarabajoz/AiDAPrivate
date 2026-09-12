@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -1422,7 +1423,9 @@ bool cfg_bool_param(const json& params, const char* key, bool fallback)
     if (it->is_boolean())
         return it->get<bool>();
     if (it->is_number_integer())
-        return it->get<int>() != 0;
+        return it->get<std::int64_t>() != 0;
+    if (it->is_number_unsigned())
+        return it->get<std::uint64_t>() != 0;
     return fallback;
 }
 
@@ -1436,11 +1439,24 @@ int cfg_int_param(const json& params, const char* key, int fallback)
     try
     {
         if (it->is_number_integer())
-            return it->get<int>();
+        {
+            const std::int64_t value = it->get<std::int64_t>();
+            return value >= (std::numeric_limits<int>::min)() && value <= (std::numeric_limits<int>::max)()
+                ? static_cast<int>(value) : fallback;
+        }
         if (it->is_number_unsigned())
-            return static_cast<int>(it->get<std::uint64_t>());
+        {
+            const std::uint64_t value = it->get<std::uint64_t>();
+            return value <= static_cast<std::uint64_t>((std::numeric_limits<int>::max)())
+                ? static_cast<int>(value) : fallback;
+        }
         if (it->is_number())
-            return static_cast<int>(it->get<double>());
+        {
+            const double value = it->get<double>();
+            return std::isfinite(value) && value >= (std::numeric_limits<int>::min)()
+                    && value <= (std::numeric_limits<int>::max)()
+                ? static_cast<int>(value) : fallback;
+        }
         if (it->is_string())
             return std::stoi(it->get<std::string>());
     }

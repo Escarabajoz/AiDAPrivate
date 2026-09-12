@@ -1924,8 +1924,7 @@ int main(int argc, char** argv)
         | ads::CDockManager::DockAreaHasTabsMenuButton
         | ads::CDockManager::DockAreaDynamicTabsMenuButtonVisibility
         | ads::CDockManager::FloatingContainerHasWidgetTitle
-        | ads::CDockManager::FloatingContainerHasWidgetIcon
-        | ads::CDockManager::DisableStylesheet;
+        | ads::CDockManager::FloatingContainerHasWidgetIcon;
     ads::CDockManager::setConfigFlags(qads_config_flags);
     diag::log_tagged_critical_fmt("qt_shell",
         "qads_config_flags_set mask=0x%08X tid=%lu",

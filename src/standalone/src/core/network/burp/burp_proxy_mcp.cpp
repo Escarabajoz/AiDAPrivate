@@ -167,7 +167,12 @@ tool_result_t handle_start(const json& p)
     diag::log_tagged_fmt("mcp_burp", "proxy_start entry");
     mitm_proxy::proxy_config cfg;
     if (p.contains("bind_addr") && p["bind_addr"].is_string()) cfg.bind_addr = p["bind_addr"].get<std::string>();
-    if (p.contains("bind_port") && p["bind_port"].is_number()) cfg.bind_port = static_cast<uint16_t>(p["bind_port"].get<int>());
+    if (p.contains("bind_port")) {
+        if (!p["bind_port"].is_number_integer()) return tool_result_t::error("bind_port must be an integer in 1..65535");
+        long long v = p["bind_port"].get<long long>();
+        if (v < 1 || v > 65535) return tool_result_t::error("bind_port must be in 1..65535");
+        cfg.bind_port = static_cast<uint16_t>(v);
+    }
     if (p.contains("decode_tls") && p["decode_tls"].is_boolean()) cfg.decode_tls = p["decode_tls"].get<bool>();
     if (p.contains("enable_h2") && p["enable_h2"].is_boolean()) cfg.enable_h2 = p["enable_h2"].get<bool>();
     if (p.contains("enable_websocket") && p["enable_websocket"].is_boolean()) cfg.enable_websocket = p["enable_websocket"].get<bool>();
@@ -238,7 +243,12 @@ tool_result_t handle_history(const json& p)
 {
     diag::log_tagged_fmt("mcp_burp", "proxy_history entry");
     size_t limit = 0;
-    if (p.contains("limit") && p["limit"].is_number()) limit = static_cast<size_t>(p["limit"].get<int>());
+    if (p.contains("limit")) {
+        if (!p["limit"].is_number_integer()) return tool_result_t::error("limit must be a non-negative integer");
+        long long v = p["limit"].get<long long>();
+        if (v < 0 || v > 100000) return tool_result_t::error("limit must be in 0..100000");
+        limit = static_cast<size_t>(v);
+    }
     std::string filter_host;
     if (p.contains("filter_host") && p["filter_host"].is_string()) filter_host = p["filter_host"].get<std::string>();
     diag::log_tagged_fmt("mcp_burp", "proxy_history limit=%zu filter_host=%s", limit, filter_host.c_str());
@@ -382,7 +392,12 @@ tool_result_t handle_tls_observations(const json& p)
 {
     diag::log_tagged_fmt("mcp_burp", "proxy_tls_observations entry");
     size_t limit = 0;
-    if (p.contains("limit") && p["limit"].is_number()) limit = static_cast<size_t>(p["limit"].get<int>());
+    if (p.contains("limit")) {
+        if (!p["limit"].is_number_integer()) return tool_result_t::error("limit must be a non-negative integer");
+        const auto value = p["limit"].get<long long>();
+        if (value < 0 || value > 100000) return tool_result_t::error("limit must be in 0..100000");
+        limit = static_cast<size_t>(value);
+    }
     diag::log_tagged_fmt("mcp_burp", "proxy_tls_observations limit=%zu", limit);
     auto obs = mitm_proxy::get_tls_observations(limit);
     json arr = json::array();

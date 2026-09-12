@@ -29,7 +29,7 @@
     <Configuration>Debug</Configuration>
     <Platform Condition="'$(Platform)' == ''">x64</Platform>
     <RootNamespace>WhosWho</RootNamespace>
-    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0.28000.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformVersion Condition="'$(WindowsTargetPlatformVersion)' == ''">10.0.26100.0</WindowsTargetPlatformVersion>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
@@ -174,9 +174,9 @@
     <PropertyGroup>
       <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
     </PropertyGroup>
-    <Error Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.SDK.CPP.10.0.28000.1721\build\native\Microsoft.Windows.SDK.cpp.props')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.SDK.CPP.10.0.28000.1721\\build\\native\\Microsoft.Windows.SDK.cpp.props'))" />
-    <Error Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.SDK.CPP.10.0.28000.1721\build\native\Microsoft.Windows.SDK.cpp.targets')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.SDK.CPP.10.0.28000.1721\\build\\native\\Microsoft.Windows.SDK.cpp.targets'))" />
-    <Error Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.SDK.CPP.x64.10.0.28000.1721\build\native\Microsoft.Windows.SDK.cpp.x64.props')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.SDK.CPP.x64.10.0.28000.1721\\build\\native\\Microsoft.Windows.SDK.cpp.x64.props'))" />
-    <Error Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.WDK.x64.10.0.28000.2526\build\native\Microsoft.Windows.WDK.x64.props')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.WDK.x64.10.0.28000.2526\\build\\native\\Microsoft.Windows.WDK.x64.props'))" />
+    <Warning Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.SDK.CPP.10.0.28000.1721\build\native\Microsoft.Windows.SDK.cpp.props')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.SDK.CPP.10.0.28000.1721\\build\\native\\Microsoft.Windows.SDK.cpp.props'))" />
+    <Warning Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.SDK.CPP.10.0.28000.1721\build\native\Microsoft.Windows.SDK.cpp.targets')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.SDK.CPP.10.0.28000.1721\\build\\native\\Microsoft.Windows.SDK.cpp.targets'))" />
+    <Warning Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.SDK.CPP.x64.10.0.28000.1721\build\native\Microsoft.Windows.SDK.cpp.x64.props')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.SDK.CPP.x64.10.0.28000.1721\\build\\native\\Microsoft.Windows.SDK.cpp.x64.props'))" />
+    <Warning Condition="!Exists('$(SolutionDir)packages\Microsoft.Windows.WDK.x64.10.0.28000.2526\build\native\Microsoft.Windows.WDK.x64.props')" Text="$([System.String]::Format('$(ErrorText)', '$(SolutionDir)packages\\Microsoft.Windows.WDK.x64.10.0.28000.2526\\build\\native\\Microsoft.Windows.WDK.x64.props'))" />
   </Target>
 </Project>

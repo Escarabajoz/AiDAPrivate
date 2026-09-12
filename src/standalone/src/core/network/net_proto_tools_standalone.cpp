@@ -46,6 +46,8 @@ bool process_alive_for_net_proto(std::uint32_t pid)
 
 json net_proto_runtime_status(std::uint32_t pid, const char* operation)
 {
+    const DWORD entry_gle = GetLastError();
+    const int entry_wsa_error = current_wsa_last_error();
     json j;
     DWORD handle_count = 0;
     const bool handle_count_ok = GetProcessHandleCount(GetCurrentProcess(), &handle_count) != FALSE;
@@ -59,8 +61,8 @@ json net_proto_runtime_status(std::uint32_t pid, const char* operation)
     j["driver_attached_pid"] = driver_bridge::attached_pid();
     j["driver_attached_pids"] = attached;
     j["driver_attached_pid_count"] = static_cast<std::uint64_t>(attached.size());
-    j["gle"] = static_cast<std::uint32_t>(GetLastError());
-    j["wsa_error"] = current_wsa_last_error();
+    j["gle"] = static_cast<std::uint32_t>(entry_gle);
+    j["wsa_error"] = entry_wsa_error;
     j["handle_count_ok"] = handle_count_ok;
     j["process_handle_count"] = handle_count_ok ? static_cast<std::uint32_t>(handle_count) : 0u;
     aida::network::executor_status::attach_executor_snapshots(j);
@@ -472,14 +474,15 @@ tool_result_t handle_udp_reassemble(const json& raw_params)
         result["zero_capture_due_to_no_stimulus"] = packet_count == 0 && capture_performed && !stimulus_observed;
         result["no_stimulus"] = !stimulus_observed;
         result["runtime_status"] = net_proto_runtime_status(options.pid, "net_udp_session_reassemble");
+        const json runtime_status = result["runtime_status"];
         result["result_summary"] = udp_reassemble_result_summary(result, capture_sec_requested, capture_sec, capture_clamp_reason);
         diag::log_tagged_fmt("net_proto",
             "net_udp_stimulus_status operation=net_udp_session_reassemble ok=0 pid=%u target_pid_alive=%d driver_attached_pid=%u gle=%lu wsa=%d local_port=%u remote_port=%u work_pending=%llu work_active=%u critical_pending=%llu critical_active=%u capture_sec_requested=%.3f capture_sec_effective=%.3f clamp=%s max_packets_requested=%u max_payload_requested=%u packet_count=%u session_count=%u err=%s",
             options.pid,
-            process_alive_for_net_proto(options.pid) ? 1 : 0,
+            runtime_status.value("target_pid_alive", false) ? 1 : 0,
             driver_bridge::attached_pid(),
-            static_cast<unsigned long>(GetLastError()),
-            current_wsa_last_error(),
+            static_cast<unsigned long>(runtime_status.value("gle", 0u)),
+            runtime_status.value("wsa_error", 0),
             params.value("local_port", params.value("source_port", 0u)),
             params.value("remote_port", params.value("target_port", 0u)),
             static_cast<unsigned long long>(aida::network::executor_status::work_pending()),
@@ -514,17 +517,18 @@ tool_result_t handle_udp_reassemble(const json& raw_params)
     result["zero_capture_due_to_no_stimulus"] = packet_count == 0 && capture_performed && !stimulus_observed;
     result["no_stimulus"] = !stimulus_observed;
     result["runtime_status"] = net_proto_runtime_status(options.pid, "net_udp_session_reassemble");
+    const json runtime_status = result["runtime_status"];
     result["result_summary"] = udp_reassemble_result_summary(result, capture_sec_requested, capture_sec, capture_clamp_reason);
     const std::string result_backend = result.value("backend", std::string());
     const std::string first_session_id = first_string_field(result["result_summary"], "first_session_id");
     diag::log_tagged_fmt("net_proto",
         "net_udp_stimulus_status operation=net_udp_session_reassemble ok=1 pid=%u target_pid_alive=%d driver_attached_pid=%u backend=%s gle=%lu wsa=%d local_port=%u remote_port=%u work_pending=%llu work_active=%u critical_pending=%llu critical_active=%u capture_sec_requested=%.3f capture_sec_effective=%.3f clamp=%s max_packets_requested=%u max_packets_effective=%u max_payload_requested=%u max_payload_effective=%u packet_count=%u session_count=%u zero_due_to_no_stimulus=%d first_session=%s",
         options.pid,
-        process_alive_for_net_proto(options.pid) ? 1 : 0,
-        driver_bridge::attached_pid(),
-        result_backend.c_str(),
-        static_cast<unsigned long>(GetLastError()),
-        current_wsa_last_error(),
+         runtime_status.value("target_pid_alive", false) ? 1 : 0,
+         driver_bridge::attached_pid(),
+         result_backend.c_str(),
+         static_cast<unsigned long>(runtime_status.value("gle", 0u)),
+         runtime_status.value("wsa_error", 0),
         params.value("local_port", params.value("source_port", 0u)),
         params.value("remote_port", params.value("target_port", 0u)),
         static_cast<unsigned long long>(aida::network::executor_status::work_pending()),
@@ -626,7 +630,7 @@ void register_net_proto_tools(mcp_standalone::server_t& srv)
         std::string("net_proto_trace_serializer"), std::string("net_proto"),
         std::string("Sample a serializer function through bounded register-derived hooks or network-buffer sniffing and infer output fields with explicit output-byte provenance."),
         {{std::string("serializer_va"), std::string("string"), std::string("Serializer function VA."), true},
-         {std::string("buffer_reg"), std::string("string"), std::string("Buffer pointer register, default rdx."), true},
+         {std::string("buffer_reg"), std::string("string"), std::string("Buffer pointer register, default rdx."), false},
          {std::string("process_id"), std::string("number"), std::string("Target process ID. Defaults to attached process."), false},
          {std::string("size_reg"), std::string("string"), std::string("Size register, default r8."), false},
          {std::string("tid"), std::string("number"), std::string("Optional thread ID filter for kernel driver buffer sniffing."), false},

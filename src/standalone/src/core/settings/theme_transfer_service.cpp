@@ -34,6 +34,24 @@ struct request_t {
     std::string export_payload;
 };
 
+struct file_handle_guard_t {
+    HANDLE value = INVALID_HANDLE_VALUE;
+
+    explicit file_handle_guard_t(HANDLE handle) noexcept : value(handle) {}
+    ~file_handle_guard_t() noexcept { close(); }
+
+    void close() noexcept
+    {
+        if (value != INVALID_HANDLE_VALUE) {
+            ::CloseHandle(value);
+            value = INVALID_HANDLE_VALUE;
+        }
+    }
+
+    file_handle_guard_t(const file_handle_guard_t&) = delete;
+    file_handle_guard_t& operator=(const file_handle_guard_t&) = delete;
+};
+
 struct runtime_t {
     std::mutex mutex;
     std::atomic<std::uint64_t> serial{0};
@@ -208,24 +226,22 @@ bool parse_theme(const std::string& payload, theme_t& theme, std::string& error)
 bool read_file_exact(const std::filesystem::path& path, std::string& payload,
     std::string& error) noexcept
 {
-    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+    file_handle_guard_t file(::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
         nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-        nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+        nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) {
         error = "The selected theme file could not be opened.";
         return false;
     }
     LARGE_INTEGER size{};
-    if (!::GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+    if (!::GetFileSizeEx(file.value, &size) || size.QuadPart <= 0 ||
         static_cast<std::uint64_t>(size.QuadPart) > kMaximumDocumentBytes) {
-        ::CloseHandle(file);
         error = "The selected theme file is empty, unreadable, or exceeds 1 MiB.";
         return false;
     }
     try {
         payload.resize(static_cast<std::size_t>(size.QuadPart));
     } catch (...) {
-        ::CloseHandle(file);
         error = "Memory for the bounded theme document could not be allocated.";
         return false;
     }
@@ -236,14 +252,13 @@ bool read_file_exact(const std::filesystem::path& path, std::string& payload,
             payload.size() - offset,
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
         DWORD read = 0;
-        if (!::ReadFile(file, payload.data() + offset, request, &read, nullptr) ||
+        if (!::ReadFile(file.value, payload.data() + offset, request, &read, nullptr) ||
             read == 0) {
             ok = false;
             break;
         }
         offset += read;
     }
-    ::CloseHandle(file);
     if (!ok || offset != payload.size()) {
         payload.clear();
         error = "The selected theme file could not be read exactly.";
@@ -266,9 +281,9 @@ bool write_file_atomic(const request_t& request, std::string& error) noexcept
     }
     std::filesystem::path temporary = request.path;
     temporary += L".aida-theme-" + std::to_wstring(request.serial) + L".tmp";
-    HANDLE file = ::CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
-        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr);
-    if (file == INVALID_HANDLE_VALUE) {
+    file_handle_guard_t file(::CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_WRITE_THROUGH, nullptr));
+    if (file.value == INVALID_HANDLE_VALUE) {
         error = "The temporary theme export file could not be created.";
         return false;
     }
@@ -279,7 +294,7 @@ bool write_file_atomic(const request_t& request, std::string& error) noexcept
             request.export_payload.size() - offset,
             static_cast<std::size_t>((std::numeric_limits<DWORD>::max)())));
         DWORD written = 0;
-        if (!::WriteFile(file, request.export_payload.data() + offset,
+        if (!::WriteFile(file.value, request.export_payload.data() + offset,
                 chunk, &written, nullptr) || written == 0) {
             ok = false;
             break;
@@ -288,11 +303,11 @@ bool write_file_atomic(const request_t& request, std::string& error) noexcept
     }
     LARGE_INTEGER exact_size{};
     if (ok)
-        ok = ::FlushFileBuffers(file) != FALSE;
+        ok = ::FlushFileBuffers(file.value) != FALSE;
     if (ok)
-        ok = ::GetFileSizeEx(file, &exact_size) != FALSE &&
+        ok = ::GetFileSizeEx(file.value, &exact_size) != FALSE &&
             exact_size.QuadPart == static_cast<LONGLONG>(request.export_payload.size());
-    ::CloseHandle(file);
+    file.close();
     if (ok) {
         ok = ::MoveFileExW(temporary.c_str(), request.path.c_str(),
             MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;

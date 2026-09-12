@@ -115,11 +115,21 @@ tool_result_t handle_start(const json& p)
     diag::log_tagged_fmt("mcp_burp", "collaborator_start entry");
     aida::burp::collaborator::collaborator_config_t cfg;
     if (p.contains("bind_ip") && p["bind_ip"].is_string()) cfg.bind_ip = p["bind_ip"].get<std::string>();
-    if (p.contains("http_port") && p["http_port"].is_number()) cfg.http_port = static_cast<uint16_t>(p["http_port"].get<int>());
-    if (p.contains("dns_port")  && p["dns_port"].is_number())  cfg.dns_port  = static_cast<uint16_t>(p["dns_port"].get<int>());
-    if (p.contains("smtp_port") && p["smtp_port"].is_number()) cfg.smtp_port = static_cast<uint16_t>(p["smtp_port"].get<int>());
-    if (p.contains("smtps_port") && p["smtps_port"].is_number()) cfg.smtps_port = static_cast<uint16_t>(p["smtps_port"].get<int>());
-    if (p.contains("ldap_port") && p["ldap_port"].is_number()) cfg.ldap_port = static_cast<uint16_t>(p["ldap_port"].get<int>());
+    auto parse_port = [&](const char* key, uint16_t& out) -> bool {
+        if (!p.contains(key)) return true;
+        if (!p[key].is_number_integer()) return false;
+        long long v = p[key].get<long long>();
+        if (v < 1 || v > 65535) return false;
+        out = static_cast<uint16_t>(v);
+        return true;
+    };
+    if (!parse_port("http_port", cfg.http_port) ||
+        !parse_port("dns_port", cfg.dns_port) ||
+        !parse_port("smtp_port", cfg.smtp_port) ||
+        !parse_port("smtps_port", cfg.smtps_port) ||
+        !parse_port("ldap_port", cfg.ldap_port)) {
+        return tool_result_t::error("port must be an integer in 1..65535");
+    }
     if (p.contains("public_host") && p["public_host"].is_string()) cfg.public_host = p["public_host"].get<std::string>();
     if (p.contains("public_ip")   && p["public_ip"].is_string())   cfg.public_ip   = p["public_ip"].get<std::string>();
     if (p.contains("enable_http") && p["enable_http"].is_boolean()) cfg.enable_http = p["enable_http"].get<bool>();
@@ -136,8 +146,18 @@ tool_result_t handle_start(const json& p)
     }
     if (p.contains("canned_body") && p["canned_body"].is_string()) cfg.canned_body = p["canned_body"].get<std::string>();
     if (p.contains("canned_content_type") && p["canned_content_type"].is_string()) cfg.canned_content_type = p["canned_content_type"].get<std::string>();
-    if (p.contains("max_interactions") && p["max_interactions"].is_number_unsigned()) cfg.max_interactions = p["max_interactions"].get<size_t>();
-    if (p.contains("smtp_max_message") && p["smtp_max_message"].is_number_integer()) cfg.smtp_max_message = p["smtp_max_message"].get<int>();
+    if (p.contains("max_interactions")) {
+        if (!p["max_interactions"].is_number_unsigned()) return tool_result_t::error("max_interactions must be a non-negative integer");
+        size_t v = p["max_interactions"].get<size_t>();
+        if (v == 0 || v > 1000000) return tool_result_t::error("max_interactions must be in 1..1000000");
+        cfg.max_interactions = v;
+    }
+    if (p.contains("smtp_max_message")) {
+        if (!p["smtp_max_message"].is_number_integer()) return tool_result_t::error("smtp_max_message must be an integer");
+        long long v = p["smtp_max_message"].get<long long>();
+        if (v < 1024 || v > 100 * 1024 * 1024) return tool_result_t::error("smtp_max_message must be in 1024..104857600");
+        cfg.smtp_max_message = static_cast<int>(v);
+    }
     diag::log_tagged_fmt("mcp_burp", "collaborator_start public_host=%s http=%d dns=%d smtp=%d", cfg.public_host.c_str(), (int)cfg.enable_http, (int)cfg.enable_dns, (int)cfg.enable_smtp);
 
     bool ok = aida::burp::collaborator::start(cfg);
@@ -376,8 +396,18 @@ tool_result_t handle_webhook_export(const json& p)
     uint32_t timeout_ms = 10000;
     if (p.contains("since_ms") && p["since_ms"].is_number_unsigned()) since_ms = p["since_ms"].get<uint64_t>();
     if (p.contains("after_id") && p["after_id"].is_number_unsigned()) after_id = p["after_id"].get<uint64_t>();
-    if (p.contains("max_entries") && p["max_entries"].is_number_unsigned()) max_entries = p["max_entries"].get<size_t>();
-    if (p.contains("timeout_ms") && p["timeout_ms"].is_number_unsigned()) timeout_ms = p["timeout_ms"].get<uint32_t>();
+    if (p.contains("max_entries")) {
+        if (!p["max_entries"].is_number_integer()) return tool_result_t::error("max_entries must be an integer");
+        const auto value = p["max_entries"].get<long long>();
+        if (value < 0 || value > 100000) return tool_result_t::error("max_entries must be in 0..100000");
+        max_entries = static_cast<size_t>(value);
+    }
+    if (p.contains("timeout_ms")) {
+        if (!p["timeout_ms"].is_number_integer()) return tool_result_t::error("timeout_ms must be an integer");
+        const auto value = p["timeout_ms"].get<long long>();
+        if (value < 1 || value > 120000) return tool_result_t::error("timeout_ms must be in 1..120000");
+        timeout_ms = static_cast<uint32_t>(value);
+    }
     aida::burp::collaborator::webhook_delivery_result_t result;
     const bool delivered = aida::burp::collaborator::post_interactions_webhook(
         url, token, since_ms, after_id, max_entries, signing_secret, timeout_ms, result);

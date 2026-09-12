@@ -141,19 +141,23 @@ struct co_init_scope_t {
 
 std::string narrow_utf8(const std::wstring& w) {
 	if (w.empty()) return {};
-	int needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
 	if (needed <= 1) return {};
-	std::string out(static_cast<size_t>(needed - 1), '\0');
-	WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), needed, nullptr, nullptr);
+	std::string out(static_cast<size_t>(needed), '\0');
+	if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, w.c_str(), -1, out.data(), needed, nullptr, nullptr) != needed)
+		return {};
+	out.resize(static_cast<size_t>(needed - 1));
 	return out;
 }
 
 std::wstring widen_utf8(const std::string& s) {
 	if (s.empty()) return {};
-	int needed = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+	int needed = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.c_str(), -1, nullptr, 0);
 	if (needed <= 1) return {};
-	std::wstring out(static_cast<size_t>(needed - 1), L'\0');
-	MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), needed);
+	std::wstring out(static_cast<size_t>(needed), L'\0');
+	if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s.c_str(), -1, out.data(), needed) != needed)
+		return {};
+	out.resize(static_cast<size_t>(needed - 1));
 	return out;
 }
 

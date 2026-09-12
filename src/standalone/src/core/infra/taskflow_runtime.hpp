@@ -22,18 +22,8 @@
 #include <utility>
 #include <vector>
 
-#if defined(_MSC_VER) && defined(_MSVC_LANG) && _MSVC_LANG == 201703L
-#pragma push_macro("__has_include")
-#undef __has_include
-#define __has_include(...) 0
-#define AIDA_TASKFLOW_RESTORE_HAS_INCLUDE 1
-#endif
 #include <taskflow/taskflow.hpp>
-#if defined(AIDA_TASKFLOW_RESTORE_HAS_INCLUDE)
-#undef AIDA_TASKFLOW_RESTORE_HAS_INCLUDE
-#pragma pop_macro("__has_include")
-#endif
-#if !defined(TF_VERSION) || TF_VERSION != 301100
+#if !defined(TF_VERSION)
 #error Taskflow_version_mismatch
 #endif
 

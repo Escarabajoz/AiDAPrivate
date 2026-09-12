@@ -9,6 +9,7 @@
 #include <deque>
 #include <exception>
 #include <iomanip>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -475,8 +476,9 @@ struct chain_verifier_service_t::impl_t : public std::enable_shared_from_this<ch
             void* blob = nn.getblob(nullptr, &size, k_journal_blob_index, k_journal_blob_tag);
             if (blob == nullptr)
                 return nlohmann::json{{"found", false}, {"error", "blob_read_failed"}};
-            std::string text(static_cast<const char*>(blob), static_cast<const char*>(blob) + size);
-            qfree(blob);
+            const std::unique_ptr<void, decltype(&qfree)> blob_guard(blob, &qfree);
+            std::string text(static_cast<const char*>(blob_guard.get()),
+                             static_cast<const char*>(blob_guard.get()) + size);
             try
             {
                 return nlohmann::json{{"found", true}, {"journal", nlohmann::json::parse(text)}, {"bytes", size}};

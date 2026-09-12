@@ -680,7 +680,24 @@ tool_result_t tool_enumerate_endpoints(const json& params)
 
     if (params.value("include_sitemap", true) && sink.endpoints.size() < max_results) {
         std::string host = params.value("host", std::string());
-        std::uint16_t port = static_cast<std::uint16_t>(params.value("port", 0));
+        std::uint16_t port = 0;
+        if (params.contains("port")) {
+            const auto& value = params["port"];
+            std::uint64_t parsed = 0;
+            if (value.is_number_unsigned())
+                parsed = value.get<std::uint64_t>();
+            else if (value.is_number_integer()) {
+                const auto signed_value = value.get<std::int64_t>();
+                if (signed_value < 0)
+                    return tool_result_t::error("port must be an integer from 0 to 65535");
+                parsed = static_cast<std::uint64_t>(signed_value);
+            } else {
+                return tool_result_t::error("port must be an integer from 0 to 65535");
+            }
+            if (parsed > 65535)
+                return tool_result_t::error("port must be an integer from 0 to 65535");
+            port = static_cast<std::uint16_t>(parsed);
+        }
         if (host.empty() && params.contains("url") && params["url"].is_string()) {
             std::string scheme, path;
             burp::audit_http::parse_url(params["url"].get<std::string>(), scheme, host, port, path);
@@ -983,7 +1000,11 @@ void register_api_enum_tools(mcp_standalone::server_t& srv)
          p{"port", "number", "Sitemap port override.", false},
          p{"max_results", "number", "Maximum endpoints to return.", false},
          p{"max_probes", "number", "Maximum OpenAPI probes.", false},
+         p{"max_source_bytes", "number", "Maximum fetched source bytes.", false},
          p{"timeout_ms", "number", "Per-fetch timeout.", false},
+         p{"page_id", "string", "Optional Camoufox page id for browser script enumeration.", false},
+         p{"session_id", "string", "Optional Camoufox session id for browser script enumeration.", false},
+         p{"browser_timeout_ms", "number", "Bounded Camoufox script query timeout.", false},
          p{"enforce_scope", "boolean", "Require Burp scope for outbound probes.", false}},
         false,
         tool_enumerate_endpoints

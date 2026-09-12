@@ -791,9 +791,23 @@ tool_result_t tool_ws_connect(const json& params)
         cfg.path.insert(cfg.path.begin(), '/');
     cfg.origin = params.value("origin", std::string());
     cfg.subprotocol = params.value("subprotocol", std::string());
+    if (params.contains("verify_tls") && !params["verify_tls"].is_boolean())
+        return tool_result_t::error("verify_tls must be a boolean");
     cfg.verify_tls = params.value("verify_tls", true);
-    cfg.connect_timeout_ms = params.value("connect_timeout_ms", cfg.connect_timeout_ms);
-    cfg.read_timeout_ms = params.value("read_timeout_ms", cfg.read_timeout_ms);
+    if (params.contains("connect_timeout_ms")) {
+        if (!params["connect_timeout_ms"].is_number_integer()) return tool_result_t::error("connect_timeout_ms must be an integer");
+        const auto value = params["connect_timeout_ms"].get<long long>();
+        if (value < 1 || value > 120000) return tool_result_t::error("connect_timeout_ms must be in 1..120000");
+        cfg.connect_timeout_ms = static_cast<int>(value);
+    }
+    if (params.contains("read_timeout_ms")) {
+        if (!params["read_timeout_ms"].is_number_integer()) return tool_result_t::error("read_timeout_ms must be an integer");
+        const auto value = params["read_timeout_ms"].get<long long>();
+        if (value < 1 || value > 300000) return tool_result_t::error("read_timeout_ms must be in 1..300000");
+        cfg.read_timeout_ms = static_cast<int>(value);
+    }
+    if (params.contains("headers") && !params["headers"].is_object())
+        return tool_result_t::error("headers must be an object");
     diag::log_tagged_fmt("mcp_burp", "ws_connect scheme=%s host=%s port=%d path=%s parsed_url=%d timeout_ms=%d",
         cfg.scheme.c_str(), cfg.host.c_str(), (int)cfg.port, cfg.path.c_str(), parsed_url ? 1 : 0, cfg.connect_timeout_ms);
     if (params.contains("headers") && params["headers"].is_object()) {
@@ -892,9 +906,15 @@ tool_result_t tool_ws_send_text(const json& params)
 tool_result_t tool_ws_send_binary(const json& params)
 {
     uint64_t id = params.value("conn_id", 0ull);
+    if (!params.contains("data_b64") || !params["data_b64"].is_string())
+        return tool_result_t::error("data_b64 is required and must be a string");
     std::string b64 = params.value("data_b64", std::string());
+    if (b64.empty())
+        return tool_result_t::error("data_b64 is required");
     diag::log_tagged_fmt("mcp_burp", "ws_send_binary conn_id=%llu b64_len=%zu", static_cast<unsigned long long>(id), b64.size());
     auto bin = base64_decode(b64);
+    if (bin.empty())
+        return tool_result_t::error("data_b64 is invalid base64");
     ws_editor::ws_status_t before;
     bool before_available = ws_editor::get_status(id, before);
     size_t before_recorded_count = before_available ? ws_editor::frame_count(id) : 0;
@@ -920,12 +940,24 @@ tool_result_t tool_ws_send_binary(const json& params)
 tool_result_t tool_ws_send_raw(const json& params)
 {
     uint64_t id = params.value("conn_id", 0ull);
+    if (params.contains("payload_b64") && !params["payload_b64"].is_string())
+        return tool_result_t::error("payload_b64 must be a string");
+    if (params.contains("opcode") && !params["opcode"].is_number_integer())
+        return tool_result_t::error("opcode must be an integer");
+    if (params.contains("fin") && !params["fin"].is_boolean())
+        return tool_result_t::error("fin must be a boolean");
+    if (params.contains("masked") && !params["masked"].is_boolean())
+        return tool_result_t::error("masked must be a boolean");
     int opcode = params.value("opcode", 1);
     bool fin = params.value("fin", true);
     bool masked = params.value("masked", true);
     std::string b64 = params.value("payload_b64", std::string());
+    if (opcode < 0 || opcode > 15)
+        return tool_result_t::error("opcode must be in 0..15");
     diag::log_tagged_fmt("mcp_burp", "ws_send_raw conn_id=%llu opcode=%d fin=%d masked=%d", static_cast<unsigned long long>(id), opcode, (int)fin, (int)masked);
     auto bin = base64_decode(b64);
+    if (bin.empty() && !b64.empty())
+        return tool_result_t::error("payload_b64 is invalid base64");
     ws_editor::ws_status_t before;
     bool before_available = ws_editor::get_status(id, before);
     size_t before_recorded_count = before_available ? ws_editor::frame_count(id) : 0;
@@ -977,8 +1009,20 @@ tool_result_t tool_ws_list(const json& params)
 tool_result_t tool_ws_frames(const json& params)
 {
     uint64_t id = params.value("conn_id", 0ull);
-    size_t start = params.value("start", 0u);
-    size_t maxv  = params.value("max", 256u);
+    size_t start = 0;
+    size_t maxv = 256;
+    if (params.contains("start")) {
+        if (!params["start"].is_number_integer()) return tool_result_t::error("start must be an integer");
+        const auto value = params["start"].get<long long>();
+        if (value < 0 || value > 10000000) return tool_result_t::error("start must be in 0..10000000");
+        start = static_cast<size_t>(value);
+    }
+    if (params.contains("max")) {
+        if (!params["max"].is_number_integer()) return tool_result_t::error("max must be an integer");
+        const auto value = params["max"].get<long long>();
+        if (value < 1 || value > 10000) return tool_result_t::error("max must be in 1..10000");
+        maxv = static_cast<size_t>(value);
+    }
     diag::log_tagged_fmt("mcp_burp", "ws_frames conn_id=%llu start=%zu max=%zu", static_cast<unsigned long long>(id), start, maxv);
     ws_editor::ws_status_t st;
     if (!ws_editor::get_status(id, st))
@@ -1042,7 +1086,14 @@ tool_result_t tool_report_generate(const json& params)
     cfg.session_id = params.value("session_id", std::string());
     cfg.include_session_context = params.value("include_session_context", true);
     cfg.include_audit_trail = params.value("include_audit_trail", false);
-    cfg.audit_trail_limit = static_cast<size_t>(params.value("audit_trail_limit", 128));
+    if (params.contains("audit_trail_limit")) {
+        if (!params["audit_trail_limit"].is_number_integer()) return tool_result_t::error("audit_trail_limit must be an integer");
+        long long v = params["audit_trail_limit"].get<long long>();
+        if (v < 0 || v > 10000) return tool_result_t::error("audit_trail_limit must be in 0..10000");
+        cfg.audit_trail_limit = static_cast<size_t>(v);
+    } else {
+        cfg.audit_trail_limit = 128;
+    }
     cfg.target_domain = params.value("target_domain", params.value("host", std::string()));
     cfg.include_recon = params.value("include_recon", true);
     cfg.include_suppressed = params.value("include_suppressed", false);

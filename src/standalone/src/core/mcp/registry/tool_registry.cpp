@@ -294,16 +294,9 @@ bool tool_registry_t::register_tool(tool_def_t tool) {
     const auto duplicate = std::find_if(
         tools_.begin(), tools_.end(), [&tool](const tool_def_t& existing) {
             return existing.name == tool.name;
-        });
-    if (duplicate != tools_.end()) {
-        if (tool.name == "decompile_function" &&
-            duplicate->visibility == tool_visibility_t::external_visible &&
-            tool.visibility == tool_visibility_t::external_visible) {
-            *duplicate = std::move(tool);
-            return true;
-        }
+    });
+    if (duplicate != tools_.end())
         return false;
-    }
     tools_.push_back(std::move(tool));
     return true;
 }

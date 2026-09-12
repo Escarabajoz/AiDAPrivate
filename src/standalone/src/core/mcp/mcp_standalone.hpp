@@ -108,7 +108,7 @@ namespace mcp_standalone
         bool start(int port);
         void stop();
         bool is_running() const { return _running.load(); }
-        int  get_port() const { return _port; }
+        int  get_port() const { return _port.load(std::memory_order_acquire); }
         bool register_tool(tool_def_t tool);
         bool register_tool(
             tool_def_t tool,
@@ -154,11 +154,12 @@ namespace mcp_standalone
         std::atomic<bool> _stop_requested{false};
         void* _active_server = nullptr;
         std::mutex _server_mtx;
+        std::mutex _lifecycle_mtx;
         std::atomic<std::uint32_t> _server_worker_tid{0};
         mutable std::mutex _local_capability_mtx;
         std::string _local_capability;
         std::string _local_run_binding;
-        int _port = 0;
+        std::atomic<int> _port{0};
     };
 
     void register_standalone_tools(server_t& server);

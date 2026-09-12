@@ -107,7 +107,12 @@ tool_result_t handle_generate(const json& p)
     if (p.contains("session_id") && p["session_id"].is_string()) cfg.session_id = p["session_id"].get<std::string>();
     if (p.contains("include_session_context") && p["include_session_context"].is_boolean()) cfg.include_session_context = p["include_session_context"].get<bool>();
     if (p.contains("include_audit_trail") && p["include_audit_trail"].is_boolean()) cfg.include_audit_trail = p["include_audit_trail"].get<bool>();
-    if (p.contains("audit_trail_limit") && p["audit_trail_limit"].is_number_unsigned()) cfg.audit_trail_limit = static_cast<size_t>(p["audit_trail_limit"].get<uint64_t>());
+    if (p.contains("audit_trail_limit")) {
+        if (!p["audit_trail_limit"].is_number_integer()) return tool_result_t::error("audit_trail_limit must be an integer");
+        const auto value = p["audit_trail_limit"].get<long long>();
+        if (value < 0 || value > 10000) return tool_result_t::error("audit_trail_limit must be in 0..10000");
+        cfg.audit_trail_limit = static_cast<size_t>(value);
+    }
     if (p.contains("target_domain") && p["target_domain"].is_string()) cfg.target_domain = p["target_domain"].get<std::string>();
     else if (p.contains("host") && p["host"].is_string()) cfg.target_domain = p["host"].get<std::string>();
     if (p.contains("include_recon") && p["include_recon"].is_boolean()) cfg.include_recon = p["include_recon"].get<bool>();

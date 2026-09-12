@@ -702,6 +702,7 @@ struct uc_trace_ctx_t {
     std::uint64_t               mapped_code_base = 0;
     std::uint32_t               invalid_page_maps = 0;
     bool                        cancelled = false;
+    bool                        hook_failure = false;
 };
 
 static void uc_read_regs(uc_engine* uc, trace_entry_t& entry)
@@ -773,6 +774,8 @@ static void prepare_snapshot_for_config(process_snapshot_t& snapshot, const emul
 static void hook_code_cb(uc_engine* uc, uint64_t address, uint32_t size, void* user_data)
 {
     auto* ctx = static_cast<uc_trace_ctx_t*>(user_data);
+    try
+    {
     ctx->current_rip = address;
     ctx->insn_count++;
 
@@ -841,6 +844,18 @@ static void hook_code_cb(uc_engine* uc, uint64_t address, uint32_t size, void* u
 
     if (ctx->hit_ret)
         uc_emu_stop(uc);
+    }
+    catch (...)
+    {
+        diag::log_tagged_fmt("emulation", "unicorn_hook_code_exception address=0x%llX",
+            static_cast<unsigned long long>(address));
+        if (ctx)
+        {
+            ctx->cancelled = true;
+            ctx->hook_failure = true;
+        }
+        uc_emu_stop(uc);
+    }
 }
 
 static void hook_mem_write_cb(uc_engine* , uc_mem_type ,
@@ -1022,27 +1037,31 @@ emulation_result_t emulate_from_snapshot(
 
         std::uint64_t aligned_base = region.base & ~0xFFFULL;
         std::uint64_t aligned_end  = (region.base + region.size + 0xFFF) & ~0xFFFULL;
-        std::uint64_t aligned_size = aligned_end - aligned_base;
+        if (aligned_end > aligned_base)
+            to_map.push_back({aligned_base, aligned_end - aligned_base});
+    }
 
+    std::sort(to_map.begin(), to_map.end(),
+        [](const merged_region_t& a, const merged_region_t& b) { return a.base < b.base; });
 
-        bool merged = false;
-        for (auto& m : to_map)
+    std::vector<merged_region_t> coalesced;
+    coalesced.reserve(to_map.size());
+    for (const auto& m : to_map)
+    {
+        if (!coalesced.empty())
         {
+            std::uint64_t back_end = coalesced.back().base + coalesced.back().size;
             std::uint64_t m_end = m.base + m.size;
-            if (aligned_base < m_end && aligned_end > m.base)
+            if (m.base <= back_end)
             {
-
-                std::uint64_t new_base = std::min(m.base, aligned_base);
-                std::uint64_t new_end  = std::max(m_end, aligned_end);
-                m.base = new_base;
-                m.size = new_end - new_base;
-                merged = true;
-                break;
+                if (m_end > back_end)
+                    coalesced.back().size = m_end - coalesced.back().base;
+                continue;
             }
         }
-        if (!merged)
-            to_map.push_back({aligned_base, aligned_size});
+        coalesced.push_back(m);
     }
+    to_map = std::move(coalesced);
 
 
     for (const auto& m : to_map)
@@ -1070,6 +1089,70 @@ emulation_result_t emulate_from_snapshot(
     std::size_t          code_at_rip_size = 0;
     std::uint64_t        code_at_rip_base = 0;
 
+    struct written_range_t { std::uint64_t base; std::uint64_t end; };
+    std::vector<written_range_t> written_ranges;
+    written_ranges.reserve(snapshot.regions.size());
+
+    auto record_coverage = [&](std::uint64_t base, std::uint64_t end)
+    {
+        std::uint64_t merged_base = base;
+        std::uint64_t merged_end = end;
+        while (true)
+        {
+            bool grew = false;
+            for (auto& wr : written_ranges)
+            {
+                if (merged_base <= wr.end && wr.base <= merged_end)
+                {
+                    merged_base = std::min(merged_base, wr.base);
+                    merged_end = std::max(merged_end, wr.end);
+                    wr = written_ranges.back();
+                    written_ranges.pop_back();
+                    grew = true;
+                    break;
+                }
+            }
+            if (!grew)
+                break;
+        }
+        written_ranges.push_back({merged_base, merged_end});
+    };
+
+    auto write_region_payload = [&](const memory_snapshot_region_t& region, uc_err& out_err) -> bool
+    {
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> uncovered;
+        std::uint64_t cursor = region.base;
+        const std::uint64_t region_end = region.base + region.data.size();
+        for (const auto& wr : written_ranges)
+        {
+            if (wr.end <= cursor || wr.base >= region_end)
+                continue;
+            if (wr.base > cursor)
+                uncovered.push_back({cursor, std::min<std::uint64_t>(wr.base, region_end)});
+            cursor = std::max<std::uint64_t>(cursor, wr.end);
+        }
+        if (cursor < region_end)
+            uncovered.push_back({cursor, region_end});
+
+        for (const auto& chunk : uncovered)
+        {
+            const std::uint64_t offset = chunk.first - region.base;
+            const std::uint64_t length = chunk.second - chunk.first;
+            std::string failure;
+            if (!unicorn_mem_write_checked(uc, chunk.first, region.data.data() + offset, static_cast<std::size_t>(length), &config, "snapshot_region_write", out_err, failure)) {
+                result.error = failure;
+                return false;
+            }
+            if (out_err != UC_ERR_OK) {
+                result.error = std::string("uc_mem_write failed: ") + uc_strerror(out_err);
+                return false;
+            }
+        }
+        if (region_end > region.base)
+            record_coverage(region.base, region_end);
+        return true;
+    };
+
     for (const auto& region : snapshot.regions)
     {
         if (emu_cancelled(&config, "unicorn_write_loop")) {
@@ -1078,20 +1161,13 @@ emulation_result_t emulate_from_snapshot(
         }
         if (!region.data.empty())
         {
-            std::string failure;
-            if (!unicorn_mem_write_checked(uc, region.base, region.data.data(), region.data.size(), &config, "snapshot_region_write", err, failure)) {
-                result.error = failure;
+            if (!write_region_payload(region, err))
                 return result;
-            }
-            if (err != UC_ERR_OK) {
-                result.error = std::string("uc_mem_write failed: ") + uc_strerror(err);
-                return result;
-            }
         }
 
 
         std::uint64_t start = result.start_address;
-        if (start >= region.base && start < region.base + region.size)
+        if (code_at_rip == nullptr && start >= region.base && start < region.base + region.size)
         {
             code_at_rip      = region.data.data();
             code_at_rip_size = region.data.size();

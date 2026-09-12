@@ -158,6 +158,8 @@ mcp_result_t mcp_result_t::with_aida_metadata(const json& trusted_metadata) cons
 
     mcp_result_t result = *this;
     result.aida_metadata_ = merge_metadata(aida_metadata_, trusted_metadata);
+    if (result.is_error_)
+        result.aida_metadata_["error_code"] = result.error_code_;
     return result;
 }
 

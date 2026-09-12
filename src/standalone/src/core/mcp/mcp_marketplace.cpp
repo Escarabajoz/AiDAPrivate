@@ -303,7 +303,8 @@ static void feed_install_output_line(std::string& pending, const char* data, qsi
 static std::string run_process_capture(const QString& program,
                                        const QStringList& args,
                                        const std::string& working_dir,
-                                       int timeout_ms = 60000)
+                                       int timeout_ms = 60000,
+                                       int* out_exit_code = nullptr)
 {
     std::string output;
     std::string pending_line;
@@ -369,8 +370,10 @@ static std::string run_process_capture(const QString& program,
     }
     if (terminated)
         emit_install_output("Process timed out and was terminated");
+    int exit_code = terminated ? -1 : process.exitCode();
+    if (out_exit_code) *out_exit_code = exit_code;
     diag::log_tagged_fmt("mcp_market", "install_spawn_exit program='%s' code=%d timeout=%d",
-        program.toStdString().c_str(), process.exitCode(), terminated ? 1 : 0);
+        program.toStdString().c_str(), exit_code, terminated ? 1 : 0);
     return output;
 }
 
@@ -675,13 +678,21 @@ void install_async(const package_info_t& pkg)
                 if (QFileInfo::exists(candidate))
                     npm_cli = candidate;
             }
+            int npm_exit = -1;
             if (!node.isEmpty() && !npm_cli.isEmpty()) {
                 emit_install_output("npm install (node) " + spec);
                 output = run_process_capture(node,
                     { npm_cli, QStringLiteral("install"),
                       QStringLiteral("--prefix"), QString::fromStdString(pkg_dir),
                       QString::fromStdString(spec) },
-                    pkg_dir, 120000);
+                    pkg_dir, 120000, &npm_exit);
+                if (npm_exit != 0) {
+                    diag::log_tagged_fmt("mcp_market", "install_async npm_failed pkg='%s' exit=%d", p.name.c_str(), npm_exit);
+                    std::lock_guard<std::mutex> lk(s_mtx);
+                    s_install_state = install_state_t::error_state;
+                    s_install_error = "npm install failed (exit " + std::to_string(npm_exit) + "). Output:\n" + output.substr(0, 500);
+                    return;
+                }
             } else {
                 diag::log_tagged("mcp_market",
                     "install_async npm node/npm-cli resolution failed; using cmd.exe fallback");
@@ -697,6 +708,14 @@ void install_async(const package_info_t& pkg)
                     output = "Failed to start cmd.exe: "
                         + process.errorString().toStdString();
                     emit_install_output(output);
+                    npm_exit = -1;
+                    diag::log_tagged_fmt("mcp_market", "install_async npm_cmd_start_failed pkg='%s'", p.name.c_str());
+                    {
+                        std::lock_guard<std::mutex> lk(s_mtx);
+                        s_install_state = install_state_t::error_state;
+                        s_install_error = output;
+                    }
+                    return;
                 } else {
                     QElapsedTimer timer;
                     timer.start();
@@ -751,6 +770,14 @@ void install_async(const package_info_t& pkg)
                     }
                     if (!pending_line.empty())
                         emit_install_output(pending_line);
+                    npm_exit = process.exitCode();
+                    if (npm_exit != 0) {
+                        diag::log_tagged_fmt("mcp_market", "install_async npm_cmd_failed pkg='%s' exit=%d", p.name.c_str(), npm_exit);
+                        std::lock_guard<std::mutex> lk(s_mtx);
+                        s_install_state = install_state_t::error_state;
+                        s_install_error = "npm install failed (exit " + std::to_string(npm_exit) + "). Output:\n" + output.substr(0, 500);
+                        return;
+                    }
                 }
             }
         } else {
@@ -767,25 +794,52 @@ void install_async(const package_info_t& pkg)
                 return;
             }
             emit_install_output("python -m venv " + venv_dir);
+            int venv_exit = -1;
             run_process_capture(python,
                 { QStringLiteral("-m"), QStringLiteral("venv"),
                   QString::fromStdString(venv_dir) },
-                pkg_dir, 60000);
+                pkg_dir, 60000, &venv_exit);
+            if (venv_exit != 0) {
+                diag::log_tagged_fmt("mcp_market", "install_async venv_failed pkg='%s' exit=%d", p.name.c_str(), venv_exit);
+                std::lock_guard<std::mutex> lk(s_mtx);
+                s_install_state = install_state_t::error_state;
+                s_install_error = "python -m venv failed (exit " + std::to_string(venv_exit) + ")";
+                return;
+            }
 
             const QString pip = QString::fromStdString(venv_dir + "\\Scripts\\pip.exe");
             std::string spec = p.version.empty() ? p.name : (p.name + "==" + p.version);
             emit_install_output("pip install " + spec);
+            int pip_exit = -1;
             output = run_process_capture(pip,
                 { QStringLiteral("install"), QString::fromStdString(spec) },
-                pkg_dir, 120000);
+                pkg_dir, 120000, &pip_exit);
+            if (pip_exit != 0) {
+                diag::log_tagged_fmt("mcp_market", "install_async pip_failed pkg='%s' exit=%d", p.name.c_str(), pip_exit);
+                std::lock_guard<std::mutex> lk(s_mtx);
+                s_install_state = install_state_t::error_state;
+                s_install_error = "pip install failed (exit " + std::to_string(pip_exit) + "). Output:\n" + output.substr(0, 500);
+                return;
+            }
         }
 
 
         bool success = false;
         if (p.registry == registry_t::npm) {
-            success = std::filesystem::exists(pkg_dir + "\\node_modules", ec);
+            std::filesystem::path pkg_node = std::filesystem::path(pkg_dir) / "node_modules" / p.name;
+            success = std::filesystem::exists(pkg_node, ec);
+            if (!success || ec) {
+                ec.clear();
+                success = std::filesystem::exists(std::filesystem::path(pkg_dir) / "node_modules", ec);
+            }
+            if (success && ec) success = false;
         } else {
-            success = std::filesystem::exists(pkg_dir + "\\venv\\Scripts", ec);
+            success = std::filesystem::exists(pkg_dir + "\\venv\\Scripts\\pip.exe", ec);
+            if (success && ec) success = false;
+            if (success) {
+                bool py_exists = std::filesystem::exists(pkg_dir + "\\venv\\Scripts\\python.exe", ec);
+                if (!py_exists || ec) success = false;
+            }
         }
 
         if (!success) {

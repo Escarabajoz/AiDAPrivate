@@ -6,6 +6,7 @@
 #include <netnode.hpp>
 #include <prodir.h>
 #include <bcrypt.h>
+#include <limits>
 #pragma comment(lib, "bcrypt.lib")
 
 #ifdef _WIN32
@@ -509,6 +510,8 @@ bool instance_registry_t::is_pid_alive(uint64_t pid) const
     if (pid == 0)
         return false;
 #ifdef _WIN32
+    if (pid > static_cast<uint64_t>((std::numeric_limits<DWORD>::max)()))
+        return false;
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
     if (h == nullptr)
     {
@@ -524,6 +527,8 @@ bool instance_registry_t::is_pid_alive(uint64_t pid) const
         return false;
     return exit_code == STILL_ACTIVE;
 #else
+    if (pid > static_cast<uint64_t>((std::numeric_limits<pid_t>::max)()))
+        return false;
     return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
 #endif
 }

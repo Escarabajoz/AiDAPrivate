@@ -17,6 +17,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 using json = nlohmann::json;
@@ -153,6 +154,8 @@ void attach_protocol_reemit_contract(json& result, const json& params, const gam
 
 json protocol_runtime_status(const json& params, const game_protocol::capture_options_t& options, const char* operation)
 {
+    const DWORD entry_gle = GetLastError();
+    const int entry_wsa_error = current_wsa_last_error();
     json j;
     DWORD handle_count = 0;
     const bool handle_count_ok = GetProcessHandleCount(GetCurrentProcess(), &handle_count) != FALSE;
@@ -166,8 +169,8 @@ json protocol_runtime_status(const json& params, const game_protocol::capture_op
     j["driver_attached_pid"] = driver_bridge::attached_pid();
     j["driver_attached_pids"] = attached;
     j["driver_attached_pid_count"] = static_cast<std::uint64_t>(attached.size());
-    j["gle"] = static_cast<std::uint32_t>(GetLastError());
-    j["wsa_error"] = current_wsa_last_error();
+    j["gle"] = static_cast<std::uint32_t>(entry_gle);
+    j["wsa_error"] = entry_wsa_error;
     j["handle_count_ok"] = handle_count_ok;
     j["process_handle_count"] = handle_count_ok ? static_cast<std::uint32_t>(handle_count) : 0u;
     aida::network::executor_status::attach_executor_snapshots(j);
@@ -189,22 +192,26 @@ void attach_protocol_stimulus_status(json& result, const json& params, const gam
     result["stimulus_start_observed"] = stimulus_observed;
     result["zero_capture_due_to_no_stimulus"] = packet_count == 0 && !stimulus_observed;
     result["no_stimulus"] = !stimulus_observed;
-    result["protocol_runtime_status"] = protocol_runtime_status(params, options, operation);
+    json runtime_status = protocol_runtime_status(params, options, operation);
+    const bool target_pid_alive = runtime_status.value("target_pid_alive", false);
+    const std::uint32_t entry_gle = runtime_status.value("gle", 0u);
+    const int entry_wsa_error = runtime_status.value("wsa_error", 0);
+    result["protocol_runtime_status"] = std::move(runtime_status);
     attach_protocol_reemit_contract(result, params, options, operation);
     result["diagnostic_contract"] = "zero_capture_without_stimulus_is_not_functional_capture_evidence";
     diag::log_tagged_fmt("gameproto",
         "protocol_udp_stimulus_status operation=%s target_pid=%u target_pid_alive=%d driver_attached_pid=%u protocol=%u capture_ms=%u packets=%llu stimulus_observed=%d zero_due_to_no_stimulus=%d gle=%lu wsa=%d local_port=%u remote_port=%u work_pending=%llu work_active=%u critical_pending=%llu critical_active=%u",
         operation ? operation : "",
         options.pid,
-        process_alive_for_protocol_status(options.pid) ? 1 : 0,
+        target_pid_alive ? 1 : 0,
         driver_bridge::attached_pid(),
         options.protocol,
         options.capture_ms,
         static_cast<unsigned long long>(packet_count),
         stimulus_observed ? 1 : 0,
         (packet_count == 0 && !stimulus_observed) ? 1 : 0,
-        static_cast<unsigned long>(GetLastError()),
-        current_wsa_last_error(),
+        static_cast<unsigned long>(entry_gle),
+        entry_wsa_error,
         params.value("local_port", params.value("source_port", 0u)),
         params.value("remote_port", params.value("target_port", 0u)),
         static_cast<unsigned long long>(aida::network::executor_status::work_pending()),
@@ -343,9 +350,11 @@ tool_result_t handle_gameproto_enet_decode(const json& raw_params)
     const json params = compat_action_payload(raw_params);
     if (!params.contains("packet_hex") || !params["packet_hex"].is_string())
         return tool_result_t::error(std::string("'packet_hex' is required."));
+    if (params["packet_hex"].get_ref<const std::string&>().empty())
+        return tool_result_t::error(std::string("packet_hex must contain at least one byte."));
     std::string error;
     auto bytes = game_protocol::hex_to_bytes(params["packet_hex"].get<std::string>(), &error, 65536);
-    if (bytes.empty() && !params["packet_hex"].get<std::string>().empty())
+    if (bytes.empty())
         return tool_result_t::error(error.empty() ? std::string("invalid packet_hex") : error);
 
     std::optional<std::uint32_t> channel;
@@ -364,10 +373,12 @@ tool_result_t handle_gameproto_decode_heuristic(const json& raw_params)
     const json params = compat_action_payload(raw_params);
     if (!params.contains("payload_hex") || !params["payload_hex"].is_string())
         return tool_result_t::error(std::string("'payload_hex' is required."));
+    if (params["payload_hex"].get_ref<const std::string&>().empty())
+        return tool_result_t::error(std::string("payload_hex must contain at least one byte."));
 
     std::string error;
     auto bytes = game_protocol::hex_to_bytes(params["payload_hex"].get<std::string>(), &error, 65536);
-    if (bytes.empty() && !params["payload_hex"].get<std::string>().empty())
+    if (bytes.empty())
         return tool_result_t::error(error.empty() ? std::string("invalid payload_hex") : error);
 
     const std::string hint = params.value("context_hint", std::string());

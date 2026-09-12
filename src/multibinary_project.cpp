@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -159,6 +160,8 @@ bool pid_alive(std::uint64_t pid)
     if (pid == current_pid())
         return true;
 #ifdef _WIN32
+    if (pid > static_cast<std::uint64_t>((std::numeric_limits<DWORD>::max)()))
+        return false;
     HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
     if (h == nullptr)
         return false;
@@ -166,6 +169,8 @@ bool pid_alive(std::uint64_t pid)
     CloseHandle(h);
     return rc == WAIT_TIMEOUT;
 #else
+    if (pid > static_cast<std::uint64_t>((std::numeric_limits<pid_t>::max)()))
+        return false;
     return kill(static_cast<pid_t>(pid), 0) == 0;
 #endif
 }

@@ -138,11 +138,14 @@ inline bool ci_contains(const std::string& haystack, const char* needle) {
 inline std::string wide_to_utf8_local(const wchar_t* text) {
     if (!text || !*text)
         return {};
-    int needed = WideCharToMultiByte(CP_UTF8, 0, text, -1, nullptr, 0, nullptr, nullptr);
+    int needed = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, nullptr, 0, nullptr, nullptr);
     if (needed <= 1)
         return {};
-    std::string out(static_cast<size_t>(needed - 1), '\0');
-    WideCharToMultiByte(CP_UTF8, 0, text, -1, out.data(), needed, nullptr, nullptr);
+    std::string out(static_cast<size_t>(needed), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, out.data(), needed,
+                            nullptr, nullptr) != needed)
+        return {};
+    out.resize(static_cast<size_t>(needed - 1));
     return out;
 }
 

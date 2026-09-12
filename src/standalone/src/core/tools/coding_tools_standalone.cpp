@@ -768,7 +768,9 @@ static tool_result_t tool_run_command(const json& params)
             bg_admission.limit,
             command.c_str());
         CloseHandle(h_stdout_rd);
+        CloseHandle(h_stdout_wr);
         CloseHandle(h_stderr_rd);
+        CloseHandle(h_stderr_wr);
         json rej = command_sessions::background_command_rejection_json(bg_admission, "standalone", "session_unknown", command);
         return tool_result_t::error("Downstream capacity exhausted; command was not started.",
             "MCP_DOWNSTREAM_CAPACITY_REJECT", rej);
